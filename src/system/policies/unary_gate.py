@@ -428,6 +428,44 @@ def _friendly_tool_block(decision: RuleDecision, ctx: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.4: LLM judge 辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _collect_prior_text(instructions: List[Dict[str, Any]], current_tcid: str) -> str:
+    """收集 current tool_call 之前所有 prior instruction 的内容（作为 LLM 上下文）。"""
+    parts = []
+    for ins in instructions:
+        content = ins.get("content")
+        if not isinstance(content, dict):
+            continue
+        # 跳过 current 本身
+        if content.get("tool_call_id") == current_tcid:
+            continue
+        tn = content.get("tool_name", "")
+        args = content.get("arguments", {})
+        result = content.get("result", {})
+        if isinstance(result, dict):
+            raw = result.get("raw", "")
+        else:
+            raw = str(result) if result else ""
+        if raw:
+            parts.append(f"[{tn}] {str(args)[:200]}\n  -> {raw[:500]}")
+    return "\n\n".join(parts[-5:])  # 最多最近 5 步
+
+
+def _summarize_args(args_dict: Dict[str, Any]) -> str:
+    """把 args 压缩成短字符串，避免 token 爆炸。"""
+    if not isinstance(args_dict, dict):
+        return str(args_dict)[:200]
+    parts = []
+    for k, v in list(args_dict.items())[:8]:
+        s = str(v)[:100]
+        parts.append(f"{k}={s}")
+    return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # 语义注入检测（Phase 2 核心）
 # ---------------------------------------------------------------------------
 
@@ -626,7 +664,7 @@ class UnaryGatePolicy(Policy):
 
         for tc in tool_calls:
             tool_name, tool_call_id, args_dict, _ = self.runtime.parse_tool_call(tc)
-            ins = instr_by_id.get(tool_call_id or "", {})
+            ins = instr_by_id.get(tool_call_id or "", "")
             ctx = _build_tool_context(
                 tool_name=tool_name,
                 tool_call_id=tool_call_id or "",
@@ -635,7 +673,38 @@ class UnaryGatePolicy(Policy):
                 runtime=self.runtime,
             )
 
-            decision = _evaluate_rules(rules=rules, ctx=ctx)
+            decision = None
+            # Phase 2.4: LLM 语义判定（窄作用域，只对高风险工具）
+            from .llm_injection_judge import judge as llm_judge, should_judge
+            if should_judge(tool_name):
+                prior_text = _collect_prior_text(instructions, tool_call_id)
+                args_summary = _summarize_args(args_dict)
+                decision_str, reason = llm_judge(
+                    prior_text=prior_text,
+                    tool_name=tool_name,
+                    args_summary=args_summary,
+                    trace_id=trace_id,
+                )
+                # 只有 LLM 明确判定 BLOCK 才算拦截，ERROR/SAFE/None 一律放行
+                # （LLM 失败不能误杀正常操作）
+                if decision_str == "BLOCK":
+                    from .unary_gate import RuleDecision
+                    decision = RuleDecision(
+                        index=0,
+                        rule_id="LLM-INJECTION-001",
+                        title="LLM 判定 tool_call 被诱导",
+                        description="prior 内容含隐式社工/prompt 注入",
+                        effect="BLOCK",
+                        scope="tool",
+                        message=reason or "LLM 判定当前 tool_call 存在被诱导风险",
+                        predicate=None,
+                        selector={},
+                        actual={},
+                        source="llm_injection_judge",
+                    )
+
+            if decision is None:
+                decision = _evaluate_rules(rules=rules, ctx=ctx)
 
             if decision is None:
                 kept.append(tc)
