@@ -187,6 +187,20 @@ def run_policy_replay_from_spec(
     final_current = _append_assistant_turn(builder, trace_id, current_msg)
     latest_instructions = builder.instructions[count_before:]
 
+    # Phase 2: 语义注入检测（必须在所有 policy 之前）
+    from ..policies.unary_gate import _adjust_propagated_trust
+    _adjust_propagated_trust(builder.instructions)
+    # 强制把 latest_instructions 的 prop_trustworthiness 设为 LOW（如果 trace 里有任何 injection marker）
+    has_injection = any(
+        (ins.get("security_type") or {}).get("prop_trust_injection")
+        for ins in builder.instructions
+    )
+    if has_injection:
+        for ins in latest_instructions:
+            st = ins.get("security_type")
+            if isinstance(st, dict):
+                st["prop_trustworthiness"] = "LOW"
+
     # 策略检查
     policy_result = check_response_policy(
         trace_id=trace_id,

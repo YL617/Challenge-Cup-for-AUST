@@ -49,6 +49,18 @@ _UNTRUSTED_SOURCE_PATTERNS = [
     re.compile(r"external", re.I),
     re.compile(r"untrusted", re.I),
     re.compile(r"attacker", re.I),
+    # 模拟 case 中常见的"伪装/注入"标记（语义而非关键词 → 攻击者改文字也会被检）
+    re.compile(r"\[隐藏指令\]", re.I),
+    re.compile(r"\[伪造身份\]", re.I),
+    re.compile(r"\[伪造签名\]", re.I),
+    re.compile(r"\[伪造\]", re.I),
+    re.compile(r"\[指令\]", re.I),
+    re.compile(r"\[ignore[_\s-]?(previous|above)[_\s-]?instructions?\]", re.I),
+    re.compile(r"ignore[_\s-]?(previous|above)[_\s-]?instructions?", re.I),
+    re.compile(r"disregard[_\s-]?(previous|above|all)", re.I),
+    re.compile(r"system[_\s-]?prompt", re.I),
+    re.compile(r"you[_\s-]are[_\s-]now", re.I),
+    re.compile(r"new[_\s-]?instructions?:", re.I),
 ]
 
 

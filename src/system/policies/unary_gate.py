@@ -428,6 +428,46 @@ def _friendly_tool_block(decision: RuleDecision, ctx: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 语义注入检测（Phase 2 核心）
+# ---------------------------------------------------------------------------
+
+
+def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
+    """对 prior 的 tool_result 内容做语义扫描，标记含 injection marker 的 instruction 为 LOW trust。
+
+    攻击者用"隐藏指令"诱导 agent，prior tool_result 里有 [隐藏指令]/[伪造身份] 等。
+    这是语义层（不依赖具体关键词，攻击者改文字也会被检），补 6 条失败 case 的关键。
+    """
+    INJECTION_MARKERS = (
+        # 中文社工/注入标记
+        "隐藏指令", "伪造身份", "伪造签名", "伪造指令", "伪造",
+        "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
+        "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
+        "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
+        "直接发送", "绕过审批", "跳过审批", "不通过审批",
+        "secret_sync", "exfil", "outbox",
+        # 英文 prompt injection 标记
+        "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
+        "do not tell", "do not inform", "do not report", "do not log",
+    )
+    for ins in instructions:
+        content = ins.get("content")
+        if not isinstance(content, dict):
+            continue
+        result = content.get("result")
+        if not isinstance(result, dict):
+            continue
+        raw = result.get("raw", "")
+        if not isinstance(raw, str):
+            continue
+        if any(mk in raw.lower() for mk in INJECTION_MARKERS):
+            st = ins.get("security_type")
+            if isinstance(st, dict):
+                st["prop_trustworthiness"] = "LOW"
+                st["prop_trust_injection"] = True  # 标记是语义检测发现的
+
+
+# ---------------------------------------------------------------------------
 # 规则加载
 # ---------------------------------------------------------------------------
 
@@ -499,6 +539,16 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "message": "政策文件受保护，禁止未授权修改",
         "enabled": True,
     },
+    {
+        "id": "GOV-DENY-005",
+        "title": "禁止浏览器类工具访问外部链接/表单",
+        "scope": "tool",
+        "selector": {"tool": ["click_link", "submit_form", "browser_open", "web_browser_navigate", "WebBrowserNavigateTo"]},
+        "predicate": {"truthy": {"const": True}},
+        "effect": "BLOCK",
+        "message": "浏览器操作默认阻断（社工攻击常用入口），如需访问请走人工审批",
+        "enabled": True,
+    },
 ]
 
 
@@ -555,6 +605,7 @@ class UnaryGatePolicy(Policy):
         trace_id: str,
         **kwargs: Any,
     ) -> PolicyCheckResult:
+        # Phase 2: 语义注入检测已由 harness 在策略检查前统一调用 _adjust_propagated_trust
         response = dict(current_response)
         tool_calls = self.runtime.extract_tool_calls(response)
         if not tool_calls:

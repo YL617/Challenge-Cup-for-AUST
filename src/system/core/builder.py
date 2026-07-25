@@ -77,12 +77,27 @@ class InstructionBuilder:
         }
 
     def _commit(self, instr: Instruction) -> Instruction:
-        """连接 source_message_id，追加到列表，计算 prop_* 污点。"""
+        """连接 source_message_id，追加到列表，计算 prop_* 污点。
+
+        Phase 2: 如果 trace 之前任何 instruction 被语义检测标为 injection，
+        当前 instruction 的 prop_trustworthiness 强制 LOW（无论 reference_tool_id 链如何）。
+        """
         if self._root_source_message_id is None:
             self._root_source_message_id = instr["id"]
         if instr.get("source_message_id") is None:
             instr["source_message_id"] = self._root_source_message_id
         self._last_instruction_id = instr["id"]
+
+        # Phase 2: 语义注入传播 — 扫描已有 instructions
+        has_injection = any(
+            (other.get("security_type") or {}).get("prop_trust_injection")
+            for other in self.instructions
+        )
+        if has_injection:
+            st = instr.get("security_type")
+            if isinstance(st, dict):
+                st["prop_trustworthiness"] = "LOW"
+
         self.instructions.append(instr)
 
         taint = compute_prop_taint_for_instruction(self.instructions, instr)
@@ -90,6 +105,9 @@ class InstructionBuilder:
         if isinstance(st, dict):
             st["prop_confidentiality"] = taint.confidentiality
             st["prop_trustworthiness"] = taint.trustworthiness
+            # Phase 2: 语义注入传播优先于 compute 结果（LOW > taint 的 HIGH）
+            if has_injection:
+                st["prop_trustworthiness"] = "LOW"
 
         return instr
 
