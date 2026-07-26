@@ -376,6 +376,7 @@ def _build_tool_context(
     args_dict: Dict[str, Any],
     ins: Dict[str, Any],
     runtime: Runtime,
+    injection_in_trace: bool = False,
 ) -> Dict[str, Any]:
     """从 tool_call instruction 构建谓词求值上下文。"""
     st = ins.get("security_type") if isinstance(ins, dict) else {}
@@ -397,6 +398,8 @@ def _build_tool_context(
         "authority": st.get("authority", "UNKNOWN"),
         "reversible": st.get("reversible", True),
         "risk": st.get("risk", "LOW"),
+        # Phase 2.5: 当前工具是否在含注入标记的 trace 里
+        "injection_in_trace": injection_in_trace,
         "tags": sorted(st.get("tags", [])) if isinstance(st.get("tags"), list) else [],
         "review_required": st.get("review_required", False),
         "approval_required": st.get("approval_required", False),
@@ -487,7 +490,38 @@ def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
         # 英文 prompt injection 标记
         "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
         "do not tell", "do not inform", "do not report", "do not log",
+        # Phase 2.5 新增：视觉/函数/编码/burst 等攻击类型（来源：XAGuard 调研 + 本次 10 条新 case）
+        # 视觉 prompt injection
+        "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
+        "ignore previous", "ignore all previous", "override", "system override",
+        # 函数调用返回值注入
+        "tool result contains", "return value", "output contains", "返回值包含", "工具返回",
+        # 跨会话投毒（KB 影响后续 session）
+        "previous session", "上轮 session", "之前用户", "prior conversation",
+        # 多语言混淆（emoji 也是）
+        "🤖", "💀", "🌐", "ignore all previous", "忽略所有",
+        # 跨 skill 链
+        "then send to", "随后发给", "and then execute", "chain to",
+        # 凭据替换攻击
+        "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
+        "sk-emergency", "api_key", "aws_access",
+        # cron 延迟任务
+        "schedule later", "at 2am", "凌晨", "delayed", "tomorrow",
+        "0 2 * * *", "每天凌晨",
+        # 编码绕过
+        "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
+        "| base64 -d", "| sh", "| bash",
+        # 提示分割（多步）
+        "step1", "step2", "step3", "execute steps", "分步", "执行 step",
+        # 异常 burst
+        "send to all", "burst", "20 times", "发所有人", "批量发送", "all users",
     )
+    # 来源标记（Spotlighting 简化版）：non-user 来源的 raw 自动加 untrusted_source 标签
+    # 借自 XA_guard 的 Microsoft Spotlighting 思路
+    _UNTRUSTED_SOURCES = frozenset({
+        "web", "document", "rag", "tool_result", "memory",
+        "kb_search", "image", "external_email", "external_doc",
+    })
     for ins in instructions:
         content = ins.get("content")
         if not isinstance(content, dict):
@@ -498,11 +532,27 @@ def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
         raw = result.get("raw", "")
         if not isinstance(raw, str):
             continue
+        # Phase 2.5: Spotlighting 来源标记（non-user 来源自动 wrap untrusted_source）
+        # 借自 XA_guard：gate1_input.py 里的 _UNTRUSTED_SOURCES 思路
+        tool_name = content.get("tool_name", "")
+        # 工具名映射：几乎所有"读取/写入外部数据"的工具都视为非用户来源
+        if any(s in tool_name.lower() for s in (
+            "read_image", "image", "kb_search", "knowledge", "web_fetch", "email",
+            "get_document", "save_to_kb", "save_kb", "save", "store",  # Phase 2.5 新增
+            "export", "write", "import",  # 任何数据导出/导入
+        )):
+            st = ins.get("security_type")
+            if isinstance(st, dict):
+                st["prop_trustworthiness"] = "LOW"
+                st["prop_trust_injection"] = True
+                st["prop_trust_source"] = "spotlighting"
+        # Phase 2.5 关键词匹配（更宽的注入 marker 列表）
         if any(mk in raw.lower() for mk in INJECTION_MARKERS):
             st = ins.get("security_type")
             if isinstance(st, dict):
                 st["prop_trustworthiness"] = "LOW"
-                st["prop_trust_injection"] = True  # 标记是语义检测发现的
+                st["prop_trust_injection"] = True
+                st["prop_trust_source"] = st.get("prop_trust_source", "keyword")
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +637,19 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "message": "浏览器操作默认阻断（社工攻击常用入口），如需访问请走人工审批",
         "enabled": True,
     },
+    {
+        # Phase 2.5: 任何工具如果 trace 里有 Spotlighting/keyword 标过的 injection
+        # 直接 deny（不再依赖 prop_trust >= conf 的模糊判定）
+        # 覆盖跨会话投毒、burst 模式、跨 skill 链诱导等 D1/D2 联合攻击
+        "id": "GOV-DENY-006",
+        "title": "prior 含诱导标记的当前工具调用一律阻断",
+        "scope": "tool",
+        "selector": {},  # 所有工具
+        "predicate": {"truthy": {"var": "injection_in_trace"}},
+        "effect": "BLOCK",
+        "message": "检测到 prior 内容含诱导/社工标记，当前工具调用被阻断",
+        "enabled": True,
+    },
 ]
 
 
@@ -662,6 +725,13 @@ class UnaryGatePolicy(Policy):
         errors: List[str] = []
         kept: List[Dict[str, Any]] = []
 
+        # Phase 2.5: 提前计算 trace 是否含 Spotlighting/keyword 标过的 instruction
+        # 给所有 tool_call 共享的 "injection_in_trace" 标志
+        injection_in_trace = any(
+            (other.get("security_type") or {}).get("prop_trust_injection")
+            for other in instructions
+        )
+
         for tc in tool_calls:
             tool_name, tool_call_id, args_dict, _ = self.runtime.parse_tool_call(tc)
             ins = instr_by_id.get(tool_call_id or "", "")
@@ -671,6 +741,7 @@ class UnaryGatePolicy(Policy):
                 args_dict=args_dict,
                 ins=ins,
                 runtime=self.runtime,
+                injection_in_trace=injection_in_trace,
             )
 
             decision = None
