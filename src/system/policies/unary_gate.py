@@ -487,9 +487,26 @@ def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
         "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
         "直接发送", "绕过审批", "跳过审批", "不通过审批",
         "secret_sync", "exfil", "outbox",
-        # 英文 prompt injection 标记
+        # 英文 prompt injection 标记（基础）
         "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
         "do not tell", "do not inform", "do not report", "do not log",
+        # W1-D2: 扩英文 prompt injection 攻击黑话（覆盖 PUB-INJECAGENT / PUB-ASB）
+        # 经典 jailbreak 模式
+        "jailbreak", "jailbroken", "jail-break", "dan mode", "developer mode", "do anything now",
+        "pretend you", "act as if", "imagine you are", "roleplay as",
+        "from now on", "previous instructions", "prior instructions", "above instructions",
+        "ignore all rules", "no restrictions", "unlock mode", "god mode", "bypass safety",
+        "training is over", "real mode", "do anything now", "without restrictions",
+        "forget your", "disregard your", "ignore your", "override your",
+        "new persona", "new role", "new identity", "as an ai",
+        "execute command", "run shell", "terminal access",
+        # 跨语种攻击
+        "translation", "language model", "respond in", "write in", "speak in",
+        "### instruction", "system:", "assistant:", "user:",
+        # 输出内容攻击（影响助手回复）
+        "exfiltrate", "leak", "transmit", "send to attacker",
+        "malicious", "backdoor", "payload", "reverse shell",
+        "decrypt", "hashdump", "lsass", "shadow file", "sam file",
         # Phase 2.5 新增：视觉/函数/编码/burst 等攻击类型（来源：XAGuard 调研 + 本次 10 条新 case）
         # 视觉 prompt injection
         "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
@@ -535,11 +552,13 @@ def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
         # Phase 2.5: Spotlighting 来源标记（non-user 来源自动 wrap untrusted_source）
         # 借自 XA_guard：gate1_input.py 里的 _UNTRUSTED_SOURCES 思路
         tool_name = content.get("tool_name", "")
-        # 工具名映射：几乎所有"读取/写入外部数据"的工具都视为非用户来源
+        # 工具名映射：只把"真正从外部数据源读"的工具视为非用户来源
+        # 写/导出/导入是用户主动操作，不标 Spotlighting（否则把正常操作误拦）
+        # 列表（5 个）：read_image / kb_search / read_email / web_fetch / save_to_kb
         if any(s in tool_name.lower() for s in (
-            "read_image", "image", "kb_search", "knowledge", "web_fetch", "email",
-            "get_document", "save_to_kb", "save_kb", "save", "store",  # Phase 2.5 新增
-            "export", "write", "import",  # 任何数据导出/导入
+            "read_image", "image",  # 图片读取（OCR 注入）
+            "kb_search", "knowledge", "save_to_kb", "save_kb",  # KB 操作
+            "web_fetch", "email", "get_document",  # 网络/邮件/文档元数据
         )):
             st = ins.get("security_type")
             if isinstance(st, dict):
@@ -638,16 +657,22 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "enabled": True,
     },
     {
-        # Phase 2.5: 任何工具如果 trace 里有 Spotlighting/keyword 标过的 injection
-        # 直接 deny（不再依赖 prop_trust >= conf 的模糊判定）
-        # 覆盖跨会话投毒、burst 模式、跨 skill 链诱导等 D1/D2 联合攻击
+        # Phase 2.5.1: 只对"高风险工具" + trace 含 injection 时 deny
+        # 解决 D1 的 7 个 FP：用户主动的 save/write 不算高风险
+        # 高风险工具：exec / send_email / send_file / export_csv / share_file / 
+        #              approve / cron / send_sms + image/kb_search 读取
         "id": "GOV-DENY-006",
-        "title": "prior 含诱导标记的当前工具调用一律阻断",
+        "title": "高风险工具 + prior 含诱导标记时阻断",
         "scope": "tool",
-        "selector": {},  # 所有工具
+        "selector": {"tool": [
+            "exec", "terminalexecute", "send_email", "send_email_batch",
+            "send_sms", "share_file", "approve", "cron",
+            "export_csv", "export", "save_to_kb",
+            "read_image", "kb_search", "knowledge_base_query",
+        ]},
         "predicate": {"truthy": {"var": "injection_in_trace"}},
         "effect": "BLOCK",
-        "message": "检测到 prior 内容含诱导/社工标记，当前工具调用被阻断",
+        "message": "检测到 prior 含诱导/社工标记，触发高风险工具调用，已阻断",
         "enabled": True,
     },
 ]
