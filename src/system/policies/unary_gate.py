@@ -28,6 +28,53 @@ from ..core.types import LEVEL_ORDER
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.5: 模块级 INJECTION_MARKERS（供 proxy 等外部模块引用）
+# ---------------------------------------------------------------------------
+
+INJECTION_MARKERS = (
+    # 中文社工/注入标记
+    "隐藏指令", "伪造身份", "伪造签名", "伪造指令", "伪造",
+    "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
+    "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
+    "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
+    "直接发送", "绕过审批", "跳过审批", "不通过审批",
+    "secret_sync", "exfil", "outbox",
+    # 英文 prompt injection 标记（基础）
+    "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
+    "do not tell", "do not inform", "do not report", "do not log",
+    # W1-D2: 英文 prompt injection 黑话
+    "jailbreak", "jailbroken", "jail-break", "dan mode", "developer mode", "do anything now",
+    "pretend you", "act as if", "imagine you are", "roleplay as",
+    "from now on", "previous instructions", "prior instructions", "above instructions",
+    "ignore all rules", "no restrictions", "unlock mode", "god mode", "bypass safety",
+    "training is over", "real mode", "without restrictions",
+    "forget your", "disregard your", "ignore your", "override your",
+    "new persona", "new role", "new identity", "as an ai",
+    "execute command", "run shell", "terminal access",
+    "translation", "language model", "respond in", "write in", "speak in",
+    "### instruction", "system:", "assistant:", "user:",
+    "exfiltrate", "leak", "transmit", "send to attacker",
+    "malicious", "backdoor", "payload", "reverse shell",
+    "decrypt", "hashdump", "lsass", "shadow file", "sam file",
+    # Phase 2.5 攻击类型
+    "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
+    "ignore previous", "ignore all previous", "override", "system override",
+    "tool result contains", "return value", "output contains", "返回值包含", "工具返回",
+    "previous session", "上轮 session", "之前用户", "prior conversation",
+    "🤖", "💀", "🌐", "忽略所有",
+    "then send to", "随后发给", "and then execute", "chain to",
+    "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
+    "sk-emergency", "api_key", "aws_access",
+    "schedule later", "at 2am", "凌晨", "delayed", "tomorrow",
+    "0 2 * * *", "每天凌晨",
+    "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
+    "| base64 -d", "| sh", "| bash",
+    "step1", "step2", "step3", "execute steps", "分步", "执行 step",
+    "send to all", "burst", "20 times", "发所有人", "批量发送", "all users",
+)
+
+
+# ---------------------------------------------------------------------------
 # RuleDecision 数据结构
 # ---------------------------------------------------------------------------
 
@@ -479,66 +526,6 @@ def _adjust_propagated_trust(instructions: List[Dict[str, Any]]) -> None:
     攻击者用"隐藏指令"诱导 agent，prior tool_result 里有 [隐藏指令]/[伪造身份] 等。
     这是语义层（不依赖具体关键词，攻击者改文字也会被检），补 6 条失败 case 的关键。
     """
-    INJECTION_MARKERS = (
-        # 中文社工/注入标记
-        "隐藏指令", "伪造身份", "伪造签名", "伪造指令", "伪造",
-        "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
-        "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
-        "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
-        "直接发送", "绕过审批", "跳过审批", "不通过审批",
-        "secret_sync", "exfil", "outbox",
-        # 英文 prompt injection 标记（基础）
-        "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
-        "do not tell", "do not inform", "do not report", "do not log",
-        # W1-D2: 扩英文 prompt injection 攻击黑话（覆盖 PUB-INJECAGENT / PUB-ASB）
-        # 经典 jailbreak 模式
-        "jailbreak", "jailbroken", "jail-break", "dan mode", "developer mode", "do anything now",
-        "pretend you", "act as if", "imagine you are", "roleplay as",
-        "from now on", "previous instructions", "prior instructions", "above instructions",
-        "ignore all rules", "no restrictions", "unlock mode", "god mode", "bypass safety",
-        "training is over", "real mode", "do anything now", "without restrictions",
-        "forget your", "disregard your", "ignore your", "override your",
-        "new persona", "new role", "new identity", "as an ai",
-        "execute command", "run shell", "terminal access",
-        # 跨语种攻击
-        "translation", "language model", "respond in", "write in", "speak in",
-        "### instruction", "system:", "assistant:", "user:",
-        # 输出内容攻击（影响助手回复）
-        "exfiltrate", "leak", "transmit", "send to attacker",
-        "malicious", "backdoor", "payload", "reverse shell",
-        "decrypt", "hashdump", "lsass", "shadow file", "sam file",
-        # Phase 2.5 新增：视觉/函数/编码/burst 等攻击类型（来源：XAGuard 调研 + 本次 10 条新 case）
-        # 视觉 prompt injection
-        "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
-        "ignore previous", "ignore all previous", "override", "system override",
-        # 函数调用返回值注入
-        "tool result contains", "return value", "output contains", "返回值包含", "工具返回",
-        # 跨会话投毒（KB 影响后续 session）
-        "previous session", "上轮 session", "之前用户", "prior conversation",
-        # 多语言混淆（emoji 也是）
-        "🤖", "💀", "🌐", "ignore all previous", "忽略所有",
-        # 跨 skill 链
-        "then send to", "随后发给", "and then execute", "chain to",
-        # 凭据替换攻击
-        "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
-        "sk-emergency", "api_key", "aws_access",
-        # cron 延迟任务
-        "schedule later", "at 2am", "凌晨", "delayed", "tomorrow",
-        "0 2 * * *", "每天凌晨",
-        # 编码绕过
-        "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
-        "| base64 -d", "| sh", "| bash",
-        # 提示分割（多步）
-        "step1", "step2", "step3", "execute steps", "分步", "执行 step",
-        # 异常 burst
-        "send to all", "burst", "20 times", "发所有人", "批量发送", "all users",
-    )
-    # 来源标记（Spotlighting 简化版）：non-user 来源的 raw 自动加 untrusted_source 标签
-    # 借自 XA_guard 的 Microsoft Spotlighting 思路
-    _UNTRUSTED_SOURCES = frozenset({
-        "web", "document", "rag", "tool_result", "memory",
-        "kb_search", "image", "external_email", "external_doc",
-    })
     for ins in instructions:
         content = ins.get("content")
         if not isinstance(content, dict):
