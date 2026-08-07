@@ -188,7 +188,26 @@ def run_policy_replay_from_spec(
     latest_instructions = builder.instructions[count_before:]
 
     # Phase 2: 语义注入检测（必须在所有 policy 之前）
-    from ..policies.unary_gate import _adjust_propagated_trust
+    from ..policies.unary_gate import _adjust_propagated_trust, INJECTION_MARKERS
+    # 扫所有 messages（含 user + assistant + tool_result）找 injection marker
+    all_msgs_text = ""
+    for msg in messages:
+        c = msg.get("content", "")
+        if isinstance(c, str):
+            all_msgs_text += " " + c
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    all_msgs_text += " " + b.get("text", "")
+    if any(mk in all_msgs_text.lower() for mk in INJECTION_MARKERS):
+        for ins in builder.instructions:
+            st = ins.get("security_type") or {}
+            if isinstance(st, dict):
+                st["prop_trust_injection"] = True
+        for ins in latest_instructions:
+            st = ins.get("security_type") or {}
+            if isinstance(st, dict):
+                st["prop_trust_injection"] = True
     _adjust_propagated_trust(builder.instructions)
     # 强制把 latest_instructions 的 prop_trustworthiness 设为 LOW（如果 trace 里有任何 injection marker）
     has_injection = any(

@@ -24,3 +24,13 @@ local-notes.md
 # *.mp4 filter=lfs diff=lfs merge=lfs -text
 # *.psd filter=lfs diff=lfs merge=lfs -text
 _working/
+
+# 本地测试 key
+.env.local
+
+# proxy 审计日志(测试数据)
+src/system/proxy/audit_log.jsonl
+
+# 临时调试脚本
+src/scripts/_*.py
+
