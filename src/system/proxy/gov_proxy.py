@@ -344,6 +344,9 @@ class GovProxyHandler(BaseHTTPRequestHandler):
         upstream_url = api_config["url"]
         # 确保 model 名正确
         request_body["model"] = api_config["model"]
+        # 强制非流式: 让 proxy 能做策略检查 (不管客户端是否请求 stream)
+        request_body["stream"] = False
+        body = json.dumps(request_body).encode()
         req = urllib.request.Request(
             upstream_url,
             data=body,
@@ -371,7 +374,7 @@ class GovProxyHandler(BaseHTTPRequestHandler):
             self.send_error(502, f"Upstream error: {e}")
             return
 
-        # 跑策略检查
+        # 非流式: 跑策略检查
         modified, audit_entries = _check_response_security(response_json, messages)
 
         # 写审计日志

@@ -645,9 +645,6 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     {
         # Phase 2.5.1: 只对"高风险工具" + trace 含 injection 时 deny
-        # 解决 D1 的 7 个 FP：用户主动的 save/write 不算高风险
-        # 高风险工具：exec / send_email / send_file / export_csv / share_file / 
-        #              approve / cron / send_sms + image/kb_search 读取
         "id": "GOV-DENY-006",
         "title": "高风险工具 + prior 含诱导标记时阻断",
         "scope": "tool",
@@ -660,6 +657,126 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "predicate": {"truthy": {"var": "injection_in_trace"}},
         "effect": "BLOCK",
         "message": "检测到 prior 含诱导/社工标记，触发高风险工具调用，已阻断",
+        "enabled": True,
+    },
+    {
+        # GOV-APPROVE-002: send_email 外发到非内部地址需审批
+        "id": "GOV-APPROVE-002",
+        "title": "邮件外发到外部/群发地址需审批",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_email_batch", "send_mail"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "to"}, "external"]},
+                {"matches": [{"var": "to"}, "public"]},
+                {"matches": [{"var": "to"}, "all-departments"]},
+                {"matches": [{"var": "to"}, "all-staff"]},
+                {"matches": [{"var": "to"}, "all-participants"]},
+                {"matches": [{"var": "to"}, "dept-share"]},
+                {"matches": [{"var": "to"}, "sibling-bureau"]},
+                {"matches": [{"var": "to"}, "subordinate"]},
+                {"matches": [{"var": "to"}, "superior-bureau"]},
+                {"matches": [{"var": "to"}, "media"]},
+                {"matches": [{"var": "cc"}, "external"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "邮件外发到外部/群发/跨部门地址，需走审批流程（当前为自动阻断保护）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-007: write 到正式/机密路径阻断
+        "id": "GOV-DENY-007",
+        "title": "写入正式/机密文件路径阻断",
+        "scope": "tool",
+        "selector": {"tool": ["write", "edit", "save", "file_write"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "path"}, "/official/"]},
+                {"matches": [{"var": "path"}, "/confidential/"]},
+                {"matches": [{"var": "path"}, "/data/policy/"]},
+                {"matches": [{"var": "path"}, "/registers/"]},
+                {"matches": [{"var": "path"}, "/archive/"]},
+                {"matches": [{"var": "path"}, "v2025"]},
+                {"matches": [{"var": "path"}, "policy"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "写入正式/机密/政策文件路径，禁止未授权修改（仅允许 /drafts/ 路径）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-008: exec 含 SQL 写操作阻断 (伪造签字/批量审批用)
+        "id": "GOV-DENY-008",
+        "title": "SQL 写操作阻断",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "terminalexecute", "process_execute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "command"}, "UPDATE\\s"]},
+                {"matches": [{"var": "command"}, "INSERT\\s"]},
+                {"matches": [{"var": "command"}, "DELETE\\s"]},
+                {"matches": [{"var": "command"}, "DROP\\s"]},
+                {"matches": [{"var": "command"}, "ALTER\\s"]},
+                {"matches": [{"var": "command"}, "SET\\s+status"]},
+                {"matches": [{"var": "command"}, "approver"]},
+                {"matches": [{"var": "command"}, "代签"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "SQL 写操作（伪造签字/批量审批）阻断，需走正式审批系统",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-009: cron/定时任务阻断 (延迟攻击用)
+        "id": "GOV-DENY-009",
+        "title": "定时任务阻断",
+        "scope": "tool",
+        "selector": {"tool": ["cron", "schedule", "crontab"]},
+        "predicate": {"truthy": {"const": True}},
+        "effect": "BLOCK",
+        "message": "定时任务默认阻断（防止延迟攻击/数据定时外泄）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-010: exec 含 journalctl --vacuum (删审计日志)
+        "id": "GOV-DENY-010",
+        "title": "审计日志清理阻断",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "command"}, "journalctl"]},
+                {"matches": [{"var": "command"}, "vacuum"]},
+                {"matches": [{"var": "command"}, "/data/logs/"]},
+                {"matches": [{"var": "command"}, "audit"]},
+                {"matches": [{"var": "command"}, "systemctl"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "审计日志/系统服务操作阻断（防止证据销毁）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-011: query_db 读取敏感表 (员工/薪资/个人)
+        "id": "GOV-DENY-011",
+        "title": "敏感数据表查询阻断",
+        "scope": "tool",
+        "selector": {"tool": ["query_db", "database_query", "sql_query"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "table"}, "employees"]},
+                {"matches": [{"var": "table"}, "salary"]},
+                {"matches": [{"var": "table"}, "personnel"]},
+                {"matches": [{"var": "table"}, "staff"]},
+                {"matches": [{"var": "query"}, "身份证"]},
+                {"matches": [{"var": "query"}, "银行卡"]},
+                {"matches": [{"var": "query"}, "薪资"]},
+                {"matches": [{"var": "query"}, "salary"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "敏感数据表（员工/薪资/个人）查询阻断，需走审批",
         "enabled": True,
     },
 ]
