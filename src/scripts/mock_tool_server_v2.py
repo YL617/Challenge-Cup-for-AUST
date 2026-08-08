@@ -38,6 +38,8 @@ def load_cases() -> Dict[str, Dict]:
     # v4 ~ v20 + v2/v3_realistic 多轮 case
     for path in [
         "data/system-design/e2e-pilot/e2e_cases_v6_realistic_23.jsonl",
+        "data/system-design/e2e-pilot/bypassed_2_retest.jsonl",
+        "data/system-design/e2e-pilot/white_cases_v1_25.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v5_realistic_15.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v4_realistic_25.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v3_realistic_50.jsonl",

@@ -779,6 +779,62 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "message": "敏感数据表（员工/薪资/个人）查询阻断，需走审批",
         "enabled": True,
     },
+    {
+        # GOV-DENY-012: write 字段名变体 (file_name/name/filename/path 全部覆盖)
+        "id": "GOV-DENY-012",
+        "title": "写入字段名变体覆盖（file_name/name/filename）",
+        "scope": "tool",
+        "selector": {"tool": ["write", "edit", "save", "file_write", "create_file"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "file_name"}, "/official/"]},
+                {"matches": [{"var": "file_name"}, "/confidential/"]},
+                {"matches": [{"var": "file_name"}, "/policy/"]},
+                {"matches": [{"var": "file_name"}, "/registers/"]},
+                {"matches": [{"var": "file_name"}, "/archive/"]},
+                {"matches": [{"var": "file_name"}, "v2025"]},
+                {"matches": [{"var": "file_name"}, "policy"]},
+                {"matches": [{"var": "name"}, "/official/"]},
+                {"matches": [{"var": "name"}, "/confidential/"]},
+                {"matches": [{"var": "name"}, "/policy/"]},
+                {"matches": [{"var": "name"}, "v2025"]},
+                {"matches": [{"var": "filename"}, "/official/"]},
+                {"matches": [{"var": "filename"}, "policy"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "写入字段变体（file_name/name/filename）检测到敏感路径，已阻断",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-013: calendar_create 字段变体支持 (start_time/end_time/summary)
+        "id": "GOV-DENY-013",
+        "title": "calendar_create 字段变体支持（start_time/summary）",
+        "scope": "tool",
+        "selector": {"tool": ["calendar_create", "schedule_meeting", "create_event"]},
+        # 注意: 单次 calendar_create 不应被拦, 应让 LLM Judge 看 trace 内是否异常
+        # 这里仅保留为占位, 不做硬规则
+        "predicate": {"truthy": {"const": False}},
+        "effect": "BLOCK",
+        "message": "calendar_create 由 LLM Judge 兜底（单次规则可能误伤）",
+        "enabled": False,  # 单条规则易误伤, 让 LLM Judge 兜底
+    },
+    {
+        # GOV-DENY-014: write 联合 send_email 时的"过度代理"组合
+        "id": "GOV-DENY-014",
+        "title": "write+send_email 联合操作（自动外发）阻断",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_email_batch", "send_mail"]},
+        "predicate": {
+            "any": [
+                # 同 trace 内有过 write 操作 + 当前 send_email
+                # (这需要在 ctx 里检查 trace_writes, 见后续增强)
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "trace 内已有 write 操作后的 send_email 被视为自动外发（待 PHASE 3.5 加 trace 级联检查）",
+        "enabled": False,  # 暂未实现 trace 级联, 保留为占位
+    },
 ]
 
 
