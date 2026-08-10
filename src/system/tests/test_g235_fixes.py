@@ -111,5 +111,45 @@ class TestG2TextBlockReplacesContent(unittest.TestCase):
         self.assertTrue(any(e["type"] == "text_blocked" for e in entries))
 
 
+class TestG11SerializedSendBlock(unittest.TestCase):
+    """G11: 会话内逐条单发邮件(化整为零)第 3 封起阻断"""
+
+    def _run(self, history_sends, current_sends):
+        """history_sends: 历史已发邮件数; current_sends: 本响应内连续发邮件数"""
+        messages = [{"role": "user", "content": "把Q4培训计划发给各科室"}]
+        if history_sends:
+            messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [_tc("send_email", {"to": f"dept{i}", "subject": "s", "body": "b"})
+                               for i in range(history_sends)],
+            })
+        resp = _make_response(tool_calls=[
+            _tc("send_email", {"to": f"dept{i}", "subject": "s", "body": "b"})
+            for i in range(current_sends)
+        ])
+        with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
+            modified, _ = proxy_mod._check_response_security(resp, messages)
+        msg = modified["choices"][0]["message"]
+        passed = [t for t in msg.get("tool_calls", [])]
+        blocked = (modified.get("x_gov_proxy") or {}).get("blocked_tool_calls", [])
+        return len(passed), len(blocked)
+
+    def test_first_two_sends_allowed(self):
+        # 历史 0 封, 本次发 2 封: 全部放行(正常通知+抄送)
+        passed, blocked = self._run(history_sends=0, current_sends=2)
+        self.assertEqual((passed, blocked), (2, 0))
+
+    def test_third_send_blocked(self):
+        # 历史 0 封, 本次连发 3 封: 前 2 放行, 第 3 拦截
+        passed, blocked = self._run(history_sends=0, current_sends=3)
+        self.assertEqual((passed, blocked), (2, 1))
+
+    def test_history_counts(self):
+        # 历史已发 2 封, 本次再发 1 封: 拦截
+        passed, blocked = self._run(history_sends=2, current_sends=1)
+        self.assertEqual((passed, blocked), (0, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

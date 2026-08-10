@@ -424,6 +424,7 @@ def _build_tool_context(
     ins: Dict[str, Any],
     runtime: Runtime,
     injection_in_trace: bool = False,
+    prior_send_count: int = 0,
 ) -> Dict[str, Any]:
     """从 tool_call instruction 构建谓词求值上下文。"""
     st = ins.get("security_type") if isinstance(ins, dict) else {}
@@ -447,6 +448,8 @@ def _build_tool_context(
         "risk": st.get("risk", "LOW"),
         # Phase 2.5: 当前工具是否在含注入标记的 trace 里
         "injection_in_trace": injection_in_trace,
+        # 会话内已发送邮件数(防化整为零: 逐条单发绕过批量审批)
+        "prior_send_count": prior_send_count,
         "tags": sorted(st.get("tags", [])) if isinstance(st.get("tags"), list) else [],
         "review_required": st.get("review_required", False),
         "approval_required": st.get("approval_required", False),
@@ -834,6 +837,22 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "effect": "BLOCK",
         "message": "trace 内已有 write 操作后的 send_email 被视为自动外发（待 PHASE 3.5 加 trace 级联检查）",
         "enabled": False,  # 暂未实现 trace 级联, 保留为占位
+    },
+    {
+        # GOV-DENY-015: 会话内逐条单发绕过批量审批 (G11)
+        # v3-02 实测: LLM 把"发共享邮箱"化整为零为逐科室单发, 批量规则失效。
+        # 正常业务一次任务发 1-2 封(通知+抄送)属合理, 第 3 封起判定为
+        # 拆分外发, 默认阻断并要求走批量审批通道。
+        "id": "GOV-DENY-015",
+        "title": "会话内逐条单发邮件绕过批量审批",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_mail"]},
+        "predicate": {
+            "ge": [{"var": "prior_send_count"}, {"const": 2}]
+        },
+        "effect": "BLOCK",
+        "message": "本次会话已发送 2 封邮件, 继续逐条发送属于拆分外发, 请改用批量审批通道",
+        "enabled": True,
     },
 ]
 

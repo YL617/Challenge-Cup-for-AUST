@@ -158,6 +158,15 @@ def _check_response_security(
     # 1. tool_call 检查
     tool_calls = message.get("tool_calls", [])
     if tool_calls:
+        # 统计会话内已发送邮件数(历史 assistant 消息 + 本响应中已处理的),
+        # 供 GOV-DENY-015 识别逐条单发绕过批量审批
+        send_names = {"send_email", "send_mail"}
+        prior_send_count = 0
+        for m in messages:
+            if m.get("role") == "assistant":
+                for htc in m.get("tool_calls", []) or []:
+                    if htc.get("function", {}).get("name", "") in send_names:
+                        prior_send_count += 1
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "")
@@ -206,7 +215,11 @@ def _check_response_security(
                 ins=instruction,
                 runtime=Runtime(),
                 injection_in_trace=has_injection,
+                prior_send_count=prior_send_count,
             )
+            # 本响应内连续 send_email 也计入累计
+            if tool_name in send_names:
+                prior_send_count += 1
 
             decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
             if decision is None and should_judge(tool_name):
