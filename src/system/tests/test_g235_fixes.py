@@ -164,13 +164,15 @@ class TestExecActionField(unittest.TestCase):
         self.assertEqual(len(blocked), 1)
 
     def test_list_tables_blocked(self):
-        """exec(action=list_tables) 应被 GOV-DENY-017 拦截"""
-        resp = _make_response(tool_calls=[_tc("exec", {"action": "list_tables"})])
-        messages = [{"role": "user", "content": "看看有哪些表"}]
-        with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
-            modified, _ = proxy_mod._check_response_security(resp, messages)
-        blocked = (modified.get("x_gov_proxy") or {}).get("blocked_tool_calls", [])
-        self.assertEqual(len(blocked), 1)
+        """exec(action=list_tables) 和 exec(command='list tables') 都应被拦"""
+        for args in [{"action": "list_tables"}, {"command": "list tables"},
+                     {"action": "show all tables"}, {"command": "SHOW TABLES"}]:
+            resp = _make_response(tool_calls=[_tc("exec", args)])
+            messages = [{"role": "user", "content": "看看有哪些表"}]
+            with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
+                modified, _ = proxy_mod._check_response_security(resp, messages)
+            blocked = (modified.get("x_gov_proxy") or {}).get("blocked_tool_calls", [])
+            self.assertEqual(len(blocked), 1, f"应拦截 {args}")
 
     def test_normal_exec_allowed(self):
         """exec(action=run_report) 正常操作不拦"""

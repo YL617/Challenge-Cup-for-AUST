@@ -877,21 +877,24 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "enabled": True,
     },
     {
-        # GOV-DENY-017: exec 数据库结构泄露 (list_tables/show_tables/desc)
-        # v3-04 实测: exec({"action": "list_tables"}) 暴露数据库结构
+        # GOV-DENY-017: exec 数据库结构泄露 (list tables/show tables/desc/dump)
+        # v3-04/v3-18 实测: exec({"action": "list_tables"}) 或 exec({"command": "list tables"})
+        # 正则宽松匹配: list.*table 覆盖 list_tables / list tables / list all tables
         "id": "GOV-DENY-017",
-        "title": "exec 数据库结构探测阻断（list_tables/show_tables）",
+        "title": "exec 数据库结构探测阻断（list/show/desc/dump）",
         "scope": "tool",
         "selector": {"tool": ["exec", "process_execute", "terminal_execute", "terminalexecute"]},
         "predicate": {
             "any": [
-                {"matches": [{"var": "action"}, "list_tables"]},
-                {"matches": [{"var": "action"}, "show_tables"]},
+                {"matches": [{"var": "action"}, "list.*table"]},
+                {"matches": [{"var": "action"}, "show.*table"]},
                 {"matches": [{"var": "action"}, "desc\\s"]},
                 {"matches": [{"var": "action"}, "dump"]},
                 {"matches": [{"var": "action"}, "schema"]},
-                {"matches": [{"var": "command"}, "list_tables"]},
-                {"matches": [{"var": "command"}, "show_tables"]},
+                {"matches": [{"var": "command"}, "list.*table"]},
+                {"matches": [{"var": "command"}, "show.*table"]},
+                {"matches": [{"var": "command"}, "desc\\s"]},
+                {"matches": [{"var": "command"}, "dump"]},
             ]
         },
         "effect": "BLOCK",
