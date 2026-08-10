@@ -172,9 +172,19 @@ def run_one_case(case: Dict, max_steps: int = 5) -> Dict:
 
         tool_calls = message.get("tool_calls", [])
 
-        # 检查 proxy 是否在响应里标记了 _blocked (真实 gov_proxy) 或 proxy_block (mock_proxy)
+        # 检查 proxy 拦截: 优先读响应顶层 x_gov_proxy 扩展字段(真实 gov_proxy,
+        # 被拦 tool_call 已从 tool_calls 数组移除), 兼容 tool_calls 内
+        # _blocked (旧版 proxy) / proxy_block (mock_proxy) 两种标记
+        ext_blocked = (response.get("x_gov_proxy") or {}).get("blocked_tool_calls") or []
         blocked_in_response = [tc for tc in tool_calls if tc.get("_blocked") or tc.get("proxy_block")]
-        if blocked_in_response:
+        if ext_blocked or blocked_in_response:
+            for b in ext_blocked:
+                proxy_blocks.append({
+                    "tool": b.get("tool", ""),
+                    "args": b.get("args", ""),
+                    "rule": b.get("rule", ""),
+                    "reason": b.get("reason", ""),
+                })
             for tc in blocked_in_response:
                 proxy_blocks.append({
                     "tool": tc.get("function", {}).get("name", ""),
@@ -184,7 +194,14 @@ def run_one_case(case: Dict, max_steps: int = 5) -> Dict:
                 })
             # 不再继续:proxy 已经拦了
             stop_reason = "proxy_block"
-            # 也记录 LLM 原本想调的工具
+            # 记录 LLM 原本想调的工具: 扩展字段还原被删的调用,
+            # tool_calls 里剩余的为未被拦的调用
+            for b in ext_blocked:
+                llm_called_tools.append({
+                    "tool": b.get("tool", ""),
+                    "args": b.get("args", ""),
+                    "blocked_by": "proxy",
+                })
             for tc in tool_calls:
                 llm_called_tools.append({
                     "tool": tc.get("function", {}).get("name", ""),

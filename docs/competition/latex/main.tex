@@ -1,0 +1,84 @@
+% !TeX program = xelatex
+% XA-202620 面向政企场景的大模型智能体安全关键技术研究 技术方案报告
+%
+% 编译: xelatex main.tex (两遍, 或用 latexmk -xelatex main.tex)
+% 依赖: TeX Live 2020+, ctex 宏集
+%
+% 写作规范(全体作者遵守):
+%   1. 不使用破折号(——), 用逗号、句号或"即"替代
+%   2. 不使用"不是…而是"句式
+%   3. 不做防御性写作, 不预答辩, 不自我贬低
+%   4. 不提及任何借鉴来源, 全文以自主研制口径陈述
+%   5. 数字优先, 能用数字不用形容词
+%   6. 每段首句说清本段要干什么
+%
+% 结构依据: docs/competition/章节规划-v2.md
+% 官方要求: 问题分析/技术路线/算法设计/实验方案/指标体系/预期效果, ≤30 页
+
+\documentclass[UTF8, a4paper, 12pt]{ctexart}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue, citecolor=black}
+\captionsetup{font=small, labelsep=quad}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  columns=flexible,
+  keepspaces=true
+}
+
+% 图片占位命令: 截图完成后替换为 \includegraphics
+\newcommand{\placeholderfig}[2]{%
+  \begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][6cm][c]{0.85\textwidth}{\centering\small 待补截图: #1}}
+    \caption{#2}
+  \end{figure}
+}
+
+\title{\heiti\Large 面向政企场景的大模型智能体安全关键技术研究\\技术方案报告}
+\author{团队名称(待填)\\学校名称(待填)}
+\date{2026 年 9 月}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\input{sections/00-abstract}
+
+\tableofcontents
+\newpage
+
+\input{sections/01-background}     % 1 项目背景与问题分析 (3页)
+\input{sections/02-system-design}  % 2 系统总体设计 (4页)
+\input{sections/03-technique}      % 3 关键技术方案 (6页)
+\input{sections/04-dataset}        % 4 评测数据集构建 (3页)
+\input{sections/05-demo}           % 5 系统实现与功能展示 (3页)
+\input{sections/06-experiments}    % 6 实验与指标体系 (4页)
+\input{sections/07-innovation}     % 7 创新点 (2页)
+\input{sections/08-prospects}      % 8 应用前景与预期效果 (1.5页)
+
+% 骨架阶段全部列出; 正文写作时替换为按 \cite 引用
+\nocite{*}
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\appendix
+\input{sections/09-appendix}       % 附录 A-D (3页)
+
+\end{document}

@@ -142,7 +142,8 @@ def judge(
     """
     model, base_url, api_key = _get_api_credentials()
     if not all([model, base_url, api_key]):
-        return "ERROR", "no_api_key"
+        # 凭证缺失一律阻断。静默放行会让整个语义层失效且无任何告警。
+        return "BLOCK", "no_api_key_(fail-closed)"
 
     system_text, messages = _build_prompt(prior_text, tool_name, args_summary, trace_id)
     # stepfun 走 Messages API（/v1/messages，anthropic 协议用顶层 system 字段）

@@ -1,0 +1,9 @@
+# LaTeX 编译中间文件
+*.aux
+*.bbl
+*.blg
+*.out
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz

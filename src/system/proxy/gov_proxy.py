@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
 
 from system.core.runtime import Runtime
 from system.policies.unary_gate import INJECTION_MARKERS as _INJECTION_MARKERS
-from system.policies.llm_injection_judge import judge as llm_judge
+from system.policies.llm_injection_judge import judge as llm_judge, should_judge
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -209,8 +209,8 @@ def _check_response_security(
             )
 
             decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
-            if decision is None and _INJECTION_MARKERS and prior_text:
-                # 没匹配 keyword 但有 prior 文本，调 LLM judge
+            if decision is None and should_judge(tool_name):
+                # 规则未命中且为高风险工具, 调 LLM judge 语义兜底
                 decision_str, reason = llm_judge(
                     prior_text=prior_text[:2000],
                     tool_name=tool_name,
@@ -236,6 +236,7 @@ def _check_response_security(
 
             if decision is not None:
                 tc["_blocked"] = decision.message
+                tc["_blocked_rule"] = getattr(decision, "rule_id", "")
 
         # 移除被标记的 tool_calls
         original_calls = message.get("tool_calls", [])
@@ -248,6 +249,20 @@ def _check_response_security(
                     "tool": tc.get("function", {}).get("name", ""),
                     "reason": tc.get("_blocked", ""),
                 })
+            # 响应顶层扩展字段, 供评测 runner 归因。
+            # tool_calls 数组保持删除被拦项, 防止真实客户端执行;
+            # OpenAI 协议客户端会忽略未知顶层字段。
+            response["x_gov_proxy"] = {
+                "blocked_tool_calls": [
+                    {
+                        "tool": tc.get("function", {}).get("name", ""),
+                        "args": tc.get("function", {}).get("arguments", ""),
+                        "rule": tc.get("_blocked_rule", ""),
+                        "reason": tc.get("_blocked", ""),
+                    }
+                    for tc in blocked
+                ],
+            }
             # 加拦截说明到文本
             existing_content = message.get("content", "")
             if existing_content is None:
@@ -296,10 +311,8 @@ def _check_response_security(
                 "reason": reason[:200],
             })
             if decision == "BLOCK":
-                if not message.get("content"):
-                    message["content"] = ""
-                block_msg = f"\n\n⚠️ 已拦截：{reason[:100]}"
-                message["content"] = (message["content"] or "") + block_msg
+                # 替换原文而非追加, 防止泄密内容照常返回给客户端
+                message["content"] = f"⚠️ 该响应已被防护系统拦截。理由:{reason[:100]}"
                 audit_entries.append({"type": "text_blocked", "reason": reason[:200]})
 
     return response, audit_entries
@@ -416,6 +429,15 @@ def main():
     print(f"   默认上游: {api_config['url']} ({api_config['name']})")
     print(f"   协议: OpenAI Chat Completions")
     print(f"   审计: {AUDIT_LOG}")
+    # Judge 层凭证检查: 缺凭证时评审层按封闭失败模式全部阻断,
+    # 必须给启动者明确信号, 避免误以为防护在工作
+    from system.policies.llm_injection_judge import _get_api_credentials
+    jm, ju, jk = _get_api_credentials()
+    if not all([jm, ju, jk]):
+        print()
+        print("   ⚠️  警告: 未找到 Judge 层模型凭证 (STEPFUN_API_KEY 等)")
+        print("   ⚠️  评审层将以封闭失败模式运行, 所有高风险工具调用一律阻断")
+        print("   ⚠️  正常业务也会受影响, 请在 .env.local 配置凭证后重启")
     print()
 
     server = ThreadingHTTPServer(("127.0.0.1", PROXY_PORT), GovProxyHandler)
