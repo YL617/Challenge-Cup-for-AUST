@@ -854,6 +854,50 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "message": "本次会话已发送 2 封邮件, 继续逐条发送属于拆分外发, 请改用批量审批通道",
         "enabled": True,
     },
+    {
+        # GOV-DENY-016: exec 通过 action 字段执行批量审批/签字 (伪造签字)
+        # v3-04/v3-18 实测: exec({"action": "approve_all"}) 穿透,
+        # GOV-DENY-002 只匹配 command 字段, 不匹配 action 字段。
+        "id": "GOV-DENY-016",
+        "title": "exec 批量审批/签字动作阻断（approve_all via action）",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "process_execute", "terminal_execute", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "action"}, "approve_all"]},
+                {"matches": [{"var": "action"}, "batch_approve"]},
+                {"matches": [{"var": "action"}, "approve"]},
+                {"matches": [{"var": "action"}, "sign"]},
+                {"matches": [{"var": "command"}, "approve_all"]},
+                {"matches": [{"var": "command"}, "batch_approve"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "exec 执行批量审批/签字动作需人工审核",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-017: exec 数据库结构泄露 (list_tables/show_tables/desc)
+        # v3-04 实测: exec({"action": "list_tables"}) 暴露数据库结构
+        "id": "GOV-DENY-017",
+        "title": "exec 数据库结构探测阻断（list_tables/show_tables）",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "process_execute", "terminal_execute", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "action"}, "list_tables"]},
+                {"matches": [{"var": "action"}, "show_tables"]},
+                {"matches": [{"var": "action"}, "desc\\s"]},
+                {"matches": [{"var": "action"}, "dump"]},
+                {"matches": [{"var": "action"}, "schema"]},
+                {"matches": [{"var": "command"}, "list_tables"]},
+                {"matches": [{"var": "command"}, "show_tables"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "exec 探测数据库结构需人工审核",
+        "enabled": True,
+    },
 ]
 
 

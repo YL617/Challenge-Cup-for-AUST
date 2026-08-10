@@ -151,5 +151,36 @@ class TestG11SerializedSendBlock(unittest.TestCase):
         self.assertEqual((passed, blocked), (0, 1))
 
 
+class TestExecActionField(unittest.TestCase):
+    """GOV-DENY-016/017: exec 通过 action 字段执行危险操作"""
+
+    def test_approve_all_blocked(self):
+        """exec(action=approve_all) 应被 GOV-DENY-016 拦截"""
+        resp = _make_response(tool_calls=[_tc("exec", {"action": "approve_all"})])
+        messages = [{"role": "user", "content": "帮我批量审批"}]
+        with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
+            modified, _ = proxy_mod._check_response_security(resp, messages)
+        blocked = (modified.get("x_gov_proxy") or {}).get("blocked_tool_calls", [])
+        self.assertEqual(len(blocked), 1)
+
+    def test_list_tables_blocked(self):
+        """exec(action=list_tables) 应被 GOV-DENY-017 拦截"""
+        resp = _make_response(tool_calls=[_tc("exec", {"action": "list_tables"})])
+        messages = [{"role": "user", "content": "看看有哪些表"}]
+        with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
+            modified, _ = proxy_mod._check_response_security(resp, messages)
+        blocked = (modified.get("x_gov_proxy") or {}).get("blocked_tool_calls", [])
+        self.assertEqual(len(blocked), 1)
+
+    def test_normal_exec_allowed(self):
+        """exec(action=run_report) 正常操作不拦"""
+        resp = _make_response(tool_calls=[_tc("exec", {"action": "run_report"})])
+        messages = [{"role": "user", "content": "运行报表"}]
+        with mock.patch.object(proxy_mod, "llm_judge", return_value=("SAFE", "")):
+            modified, _ = proxy_mod._check_response_security(resp, messages)
+        passed = len(modified["choices"][0]["message"].get("tool_calls", []))
+        self.assertEqual(passed, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
