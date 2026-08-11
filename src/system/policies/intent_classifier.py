@@ -161,6 +161,7 @@ _RECONNAISSANCE_RE = re.compile(
 _SENSITIVE_PATH_KW = [
     "/official/", "/confidential/", "/policy/", "/registers/",
     "/archive/", "v2025", "policy", "official", "机密",
+    "/reports/audit/", "/data/logs/", "底稿", "台账", "签到表",
 ]
 # 敏感表（query 查这些表 = DATA_EXPORT）
 _SENSITIVE_TABLE_KW = [
@@ -173,6 +174,9 @@ _EXTERNAL_RECIPIENT_KW = [
     "all-participants", "dept-share", "sibling-bureau", "subordinate",
     "superior-bureau", "media", "@example.com", "attacker", "外部", "群发",
     "全局", "所有部门", "跨部门", "@evil", "@external",
+    "suspicious", "third-party", "third_party", "analytics", "phishing",
+    "archive-firm", "external-firm", "external-training", "external-mail",
+    "external-org", "external-asset", "data-firm", "fix-update", "gov-update.cn",
 ]
 
 
