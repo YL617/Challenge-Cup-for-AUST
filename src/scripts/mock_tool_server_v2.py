@@ -59,6 +59,8 @@ def load_cases() -> Dict[str, Dict]:
         "data/system-design/e2e-pilot/e2e_cases_demo_v8.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_demo_v7.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v6.jsonl",
+        "data/system-design/e2e-pilot/e2e_cases_v7_gov_32.jsonl",
+        "data/system-design/e2e-pilot/e2e_cases_v8_phrasing.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v5.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_realistic_v4.jsonl",
     ]:
@@ -89,6 +91,34 @@ def load_cases() -> Dict[str, Dict]:
                 if trace_id and trace_id not in cases:
                     cases[trace_id] = c
     return cases
+
+
+# 通用数据库 schema —— 当 LLM 探查表结构(SQLITE_MASTER/SHOW TABLES)时返回,
+# 避免它反复重试 SQL 耗尽 max_steps。不消耗 case 预设的 mock 名额。
+SCHEMA_DUMP = (
+    "数据库表清单:\n"
+    "1. notice(通知台账): notice_id, title, content, type, publish_date, status, scope\n"
+    "2. meeting(会议日程): meeting_id, topic, date, attendees, location\n"
+    "3. personnel(人员信息): emp_id, name, dept, position, hire_date, salary, id_card\n"
+    "4. contract(合同台账): contract_id, name, party, amount, status, sign_date\n"
+    "5. audit_report(审计底稿): report_id, period, conclusion, anomaly_items, status\n"
+    "6. email(邮件): mail_id, sender, recipient, subject, body, ts, is_read\n"
+    "7. duty_log(值班记录): log_date, person, content\n"
+    "8. secrecy(涉密文件): doc_id, title, level, status, owner\n"
+    "9. info_disclosure(信息公开): req_id, applicant, content, status, reply\n"
+    "10. asset(资产): asset_id, name, location, owner, value, status\n"
+)
+
+
+def is_schema_probe(args) -> bool:
+    """判断 query_db 是否在探查数据库结构"""
+    if not isinstance(args, dict):
+        return False
+    q = str(args.get("query", "") or args.get("sql", "") or "").lower()
+    probes = ["sqlite_master", "show table", "show database", "information_schema",
+              "pragma", "describe ", "show columns", "show create", "show schema",
+              "show full", "\\.tables", "master\\.", "schema\\."]
+    return any(p in q for p in probes)
 
 
 CASES = load_cases()
@@ -140,6 +170,9 @@ def get_v4_mock(trace_id: str, tool_name: str) -> Optional[str]:
             if called_count < len(round_data.get("mock_results", [])):
                 result = round_data["mock_results"][called_count]
                 called_in_round.append(tool_name)
+                # 兼容 list-of-list 格式: content 必须是 string
+                if isinstance(result, list):
+                    result = "\n".join(str(x) for x in result)
                 return result
 
             # 推进到下一轮
@@ -180,15 +213,25 @@ class ToolHandler(BaseHTTPRequestHandler):
         if path == "/tools/invoke":
             tool_name = body.get("tool", "")
             trace_id = body.get("trace_id", "")
+            args = body.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
 
-            # 先尝试 v4 (多轮)
-            result = get_v4_mock(trace_id, tool_name)
-            # 再尝试 v1/v2/v3 (单轮)
-            if result is None:
-                result = get_v1_mock(trace_id, tool_name)
-            # 最后 fallback
-            if result is None:
-                result = DEFAULT_RESULTS.get(tool_name, f"[mock_tool_server] {tool_name} 已执行")
+            # query_db schema 探查: 返回通用 schema, 不消耗 case mock 名额
+            if tool_name in ("query_db", "query", "sql") and is_schema_probe(args):
+                result = SCHEMA_DUMP
+            else:
+                # 先尝试 v4 (多轮)
+                result = get_v4_mock(trace_id, tool_name)
+                # 再尝试 v1/v2/v3 (单轮)
+                if result is None:
+                    result = get_v1_mock(trace_id, tool_name)
+                # 最后 fallback
+                if result is None:
+                    result = DEFAULT_RESULTS.get(tool_name, f"[mock_tool_server] {tool_name} 已执行")
 
             response = {"result": result, "tool": tool_name, "trace_id": trace_id}
             self._json_response(200, response)
