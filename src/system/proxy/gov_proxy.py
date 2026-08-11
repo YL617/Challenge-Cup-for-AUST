@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
 from system.core.runtime import Runtime
 from system.policies.unary_gate import INJECTION_MARKERS as _INJECTION_MARKERS
 from system.policies.llm_injection_judge import judge as llm_judge, should_judge
+from system.policies.intent_classifier import classify_tool_call, intent_to_action
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -221,7 +222,24 @@ def _check_response_security(
             if tool_name in send_names:
                 prior_send_count += 1
 
-            decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
+            # 意图分类器（快速前置层, <1ms）
+            # 结构化危险操作直接 BLOCK, 不依赖 LLM Judge
+            intent, _ = classify_tool_call(tool_name, args, prior_send_count)
+            intent_action = intent_to_action(intent)
+
+            if intent_action == "BLOCK":
+                from system.policies.unary_gate import RuleDecision
+                decision = RuleDecision(
+                    index=0, rule_id=f"INTENT-{intent}",
+                    title=f"操作意图分类: {intent}",
+                    description=f"canonicalized intent: {intent}",
+                    effect="BLOCK", scope="tool",
+                    message=f"检测到危险操作意图({intent}), 已确定性阻断",
+                    predicate=None, selector={}, actual={},
+                    source="intent_classifier",
+                )
+            else:
+                decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
             if decision is None and should_judge(tool_name):
                 # 规则未命中且为高风险工具, 调 LLM judge 语义兜底
                 decision_str, reason = llm_judge(

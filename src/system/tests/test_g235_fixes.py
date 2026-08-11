@@ -74,7 +74,7 @@ class TestG3ProxyBlockSignal(unittest.TestCase):
         ext = modified.get("x_gov_proxy", {}).get("blocked_tool_calls", [])
         self.assertEqual(len(ext), 1)
         self.assertEqual(ext[0]["tool"], "exec")
-        self.assertTrue(ext[0]["rule"].startswith("GOV-"), ext[0]["rule"])
+        self.assertTrue(ext[0]["rule"].startswith(("GOV-", "INTENT-")), ext[0]["rule"])
         self.assertTrue(ext[0]["reason"])
         # 审计日志同步记录
         self.assertTrue(any(e["type"] == "tool_call_blocked" for e in entries))
