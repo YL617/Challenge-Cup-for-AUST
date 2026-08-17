@@ -165,12 +165,14 @@ class TestPolicyMapping(unittest.TestCase):
     """意图 → 策略动作映射"""
 
     def test_block_intents(self):
-        for intent in ("DESTRUCTIVE_ACTION", "AUTHORITY_OPERATION",
-                        "SYSTEM_TAMPERING", "RECONNAISSANCE"):
+        for intent in ("DESTRUCTIVE_ACTION", "SYSTEM_TAMPERING", "RECONNAISSANCE"):
             self.assertEqual(intent_to_action(intent), "BLOCK", f"{intent} 应 BLOCK")
 
     def test_judge_intent(self):
-        self.assertEqual(intent_to_action("DATA_EXPORT"), "JUDGE")
+        # AUTHORITY_OPERATION 是否用户授权依赖上下文(常规审批是合法操作),
+        # 确定性 BLOCK 会误杀所有 benign approve —— 送语义层判定
+        for intent in ("DATA_EXPORT", "AUTHORITY_OPERATION"):
+            self.assertEqual(intent_to_action(intent), "JUDGE")
 
     def test_allow_intent(self):
         self.assertEqual(intent_to_action("NORMAL_OPERATION"), "ALLOW")
