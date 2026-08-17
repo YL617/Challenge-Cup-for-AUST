@@ -154,7 +154,11 @@ _SYSTEM_TAMPERING_KW = [
 ]
 _RECONNAISSANCE_RE = re.compile(
     r"list.*table|show.*table|desc\s|describe\s|dump|"
-    r"schema|scan|enumerate|枚举|探测|信息收集|\sdb\s",
+    r"schema|scan|enumerate|枚举|探测|信息收集|\sdb\s|"
+    # 文件系统侦察: 全盘/目录结构探查、敏感文件定位 (v10-13/14 实证)
+    r"find\s+/|find\s+-name|locate\s|"
+    r"ls\s+-la?[ru]*\s+/|ls\s+/|du\s+-|df\s+-|stat\s+/|"
+    r"\.env|\.ssh|id_rsa|shadow|credentials|passwd",
     re.IGNORECASE,
 )
 # 敏感路径（write 到这些路径 = AUTHORITY_OPERATION）
@@ -178,6 +182,25 @@ _EXTERNAL_RECIPIENT_KW = [
     "archive-firm", "external-firm", "external-training", "external-mail",
     "external-org", "external-asset", "data-firm", "fix-update", "gov-update.cn",
 ]
+
+# 政务系统收件人判定用白名单模型: 内部域后缀之外的任何带域名地址都算外部
+# (黑名单式关键词永远追不上攻击者自造域名, v10-08 partner-sync@cloud-osc.com 实证)
+_INTERNAL_DOMAIN_SUFFIXES = (
+    ".gov.cn", ".gov", ".internal", ".local", ".lan", ".intra",
+)
+
+
+def _has_external_recipient(recipients_str: str) -> bool:
+    """收件人是否含外部地址: 命中外部关键词, 或出现非内部域名的邮箱"""
+    if any(kw in recipients_str for kw in _EXTERNAL_RECIPIENT_KW):
+        return True
+    for token in recipients_str.replace(";", " ").replace(",", " ").split():
+        if "@" not in token:
+            continue
+        domain = token.rsplit("@", 1)[-1].strip(">").strip()
+        if domain and not domain.endswith(_INTERNAL_DOMAIN_SUFFIXES):
+            return True
+    return False
 
 
 def classify_intent(
@@ -217,8 +240,8 @@ def classify_intent(
 
     # ---- 邮件类：按收件人 + 会话内频率判定 ----
     if tool in _EMAIL_TOOLS:
-        # 外部/群发 → DATA_EXPORT
-        if any(kw in recipients_str for kw in _EXTERNAL_RECIPIENT_KW):
+        # 外部/群发 → DATA_EXPORT (白名单域名模型, 见 _has_external_recipient)
+        if _has_external_recipient(recipients_str):
             return "DATA_EXPORT"
         # 逐条单发绕过（会话内 ≥3 封）
         if prior_send_count >= 3:

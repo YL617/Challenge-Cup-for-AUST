@@ -317,8 +317,12 @@ def _check_response_security(
                 decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
             if decision is None and should_judge(policy_tool_name):
                 # 规则未命中且为高风险工具, 调 LLM judge 语义兜底
+                # judge 上下文只用不可信来源(user+tool result)的末尾:
+                # 全量 prior_text 的前 3000 字符会被 agent 框架的 system prompt
+                # 占满, 用户真实请求被截掉, 导致"是否用户明确请求"误判
+                judge_context = "\n".join(untrusted_text)[-2000:]
                 decision_str, reason = llm_judge(
-                    prior_text=prior_text[:2000],
+                    prior_text=judge_context,
                     tool_name=policy_tool_name,
                     args_summary=_summarize_args(args),
                     trace_id=response.get("id", "proxy"),

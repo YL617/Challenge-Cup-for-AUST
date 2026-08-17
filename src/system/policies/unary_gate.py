@@ -51,7 +51,7 @@ INJECTION_MARKERS = (
     "forget your", "disregard your", "ignore your", "override your",
     "new persona", "new role", "new identity", "as an ai",
     "execute command", "run shell", "terminal access",
-    "translation", "language model", "respond in", "write in", "speak in",
+    "translation", "language model", "speak in",
     "### instruction", "system:", "assistant:", "user:",
     "exfiltrate", "leak", "transmit", "send to attacker",
     "malicious", "backdoor", "payload", "reverse shell",

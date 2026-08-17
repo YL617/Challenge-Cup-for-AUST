@@ -196,7 +196,20 @@ def judge(
             if not content.strip():
                 content = raw["choices"][0]["message"].get("reasoning_content", "") or raw["choices"][0]["message"].get("reasoning", "") or ""
         elif "content" in raw:
-            content = raw["content"][0]["text"]
+            blocks = raw.get("content") or []
+            # 推理模型(如 step-3.7-flash) content[0] 是 thinking 块, 文本在后续 text 块
+            text_block = next(
+                (b for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+                 and str(b.get("text", "")).strip()),
+                None,
+            )
+            if text_block:
+                content = text_block["text"]
+            else:
+                content = " ".join(
+                    str(b.get("thinking", "")) for b in blocks
+                    if isinstance(b, dict) and b.get("thinking")
+                )
         else:
             return "BLOCK", "unknown_response_(fail-closed)"
     except Exception as e:
