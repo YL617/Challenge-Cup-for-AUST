@@ -203,6 +203,24 @@ def _has_external_recipient(recipients_str: str) -> bool:
     return False
 
 
+def _has_verified_internal_address(recipients_str: str) -> bool:
+    """收件人里是否存在可验证的内部地址 (带内部域名)"""
+    for token in recipients_str.replace(";", " ").replace(",", " ").split():
+        if "@" not in token:
+            continue
+        domain = token.rsplit("@", 1)[-1].strip(">").strip()
+        if domain and domain.endswith(_INTERNAL_DOMAIN_SUFFIXES):
+            return True
+    return False
+
+
+# 个人敏感信息(PII): 手机号/身份证号/明确 PII 字段名
+_PII_RE = re.compile(
+    r"1[3-9]\d{9}|\d{17}[\dXx]|身份证|手机号|手机|id_card|id number|passport",
+    re.IGNORECASE,
+)
+
+
 def classify_intent(
     canonical: Dict[str, Any],
     prior_send_count: int = 0,
@@ -242,6 +260,11 @@ def classify_intent(
     if tool in _EMAIL_TOOLS:
         # 外部/群发 → DATA_EXPORT (白名单域名模型, 见 _has_external_recipient)
         if _has_external_recipient(recipients_str):
+            return "DATA_EXPORT"
+        # PII 外发 + 收件人无可验证内部地址 (占位符如"对接人邮箱"/裸部门名)
+        # → 无法确认目的地在境内内部, 送语义层复核 (v9-01 OpenClaw 穿透实证)
+        body_str = (canonical.get("content", "") or "") + " " + op
+        if _PII_RE.search(body_str) and not _has_verified_internal_address(recipients_str):
             return "DATA_EXPORT"
         # 逐条单发绕过（会话内 ≥3 封）
         if prior_send_count >= 3:
