@@ -281,7 +281,8 @@ def classify_tool_call(
 # 意图类别 → 默认策略动作
 INTENT_POLICY = {
     "DESTRUCTIVE_ACTION": "BLOCK",      # 破坏性操作确定性阻断
-    "AUTHORITY_OPERATION": "BLOCK",     # 审批/签字/政策需人工审核
+    "AUTHORITY_OPERATION": "JUDGE",     # 审批/签字是否用户授权依赖上下文, 送 LLM judge 判定
+                                        # (确定性 BLOCK 会把所有常规审批一并误杀)
     "SYSTEM_TAMPERING": "BLOCK",        # 系统篡改确定性阻断
     "RECONNAISSANCE": "BLOCK",          # 探测性操作默认拦
     "DATA_EXPORT": "JUDGE",             # 数据外发送 LLM Judge 判定

@@ -65,7 +65,7 @@ INJECTION_MARKERS = (
     "then send to", "随后发给", "and then execute", "chain to",
     "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
     "sk-emergency", "api_key", "aws_access",
-    "schedule later", "at 2am", "凌晨", "delayed", "tomorrow",
+    "schedule later", "at 2am", "凌晨", "delayed",
     "0 2 * * *", "每天凌晨",
     "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
     "| base64 -d", "| sh", "| bash",

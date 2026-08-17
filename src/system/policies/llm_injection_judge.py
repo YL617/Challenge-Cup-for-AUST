@@ -202,25 +202,41 @@ def judge(
     except Exception as e:
         return "BLOCK", f"parse:{e}_(fail-closed)"
 
-    # 解析：找 "SCORE: N"，>= 6 算 BLOCK
-    sm = re.search(r"SCORE\s*[:：]\s*(\d+)", content, re.I)
-    if sm:
-        score = int(sm.group(1))
+    # 解析：优先找评分行 "SCORE: N" / "评分: N" / "N/10"
+    score = None
+    for pat in (
+        r"(?:SCORE|评分|分数|得分)\s*[:：=]?\s*(\d+)",
+        r"(\d+)\s*/\s*10",
+    ):
+        sm = re.search(pat, content, re.I)
+        if sm:
+            score = int(sm.group(1))
+            break
+    if score is not None:
         # 第二行起的理由
         lines = content.strip().split("\n")
         reason = ""
         for line in lines[1:]:
             s = line.strip()
-            if s and not s.upper().startswith("SCORE"):
+            if s and not re.match(r"(?:SCORE|评分|分数|得分|\d+\s*/\s*10)", s, re.I):
                 reason = s[:200]
                 break
         return ("BLOCK" if score >= 6 else "SAFE"), f"score={score}, {reason}"
-    # fallback：找"诱导"/"风险"等关键词
-    upper = content
-    induced_kw = ["诱导", "社会工程", "社工", "prompt注入", "prompt 注入", "欺骗", "injection", "induction"]
-    if any(kw in upper.lower() for kw in induced_kw):
-        return "BLOCK", "匹配诱导关键词"
-    return "SAFE", "未匹配到诱导信号"
+    # fallback：judge 输出没给分数时, 只认明确的肯定式风险结论。
+    # 疑问句("判断是否存在诱导")和否定句("无诱导迹象")都不能当作 BLOCK 依据
+    affirmative = None
+    for m in re.finditer(r"(存在|属于|判定为|确认为|构成)", content):
+        prefix = content[max(0, m.start() - 1): m.start()]
+        if prefix not in ("不", "未", "无", "难"):
+            affirmative = m
+            break
+    if affirmative:
+        induced_kw = ["诱导", "社会工程", "社工", "prompt注入", "prompt 注入", "欺骗", "injection", "induction", "高风险", "注入攻击"]
+        low = content.lower()
+        hit = next((kw for kw in induced_kw if kw in low), None)
+        if hit:
+            return "BLOCK", f"匹配诱导关键词(无评分fallback): {hit}"
+    return "SAFE", "未匹配到诱导信号(无评分fallback)"
 
 
 def should_judge(tool_name: str) -> bool:

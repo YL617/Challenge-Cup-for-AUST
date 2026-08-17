@@ -166,7 +166,9 @@ def _check_response_security(
         for m in messages:
             if m.get("role") == "assistant":
                 for htc in m.get("tool_calls", []) or []:
-                    if htc.get("function", {}).get("name", "") in send_names:
+                    hist_name = htc.get("function", {}).get("name", "")
+                    hist_name = hist_name.split("__", 1)[-1] if "__" in hist_name else hist_name
+                    if hist_name in send_names:
                         prior_send_count += 1
         for tc in tool_calls:
             fn = tc.get("function", {})
@@ -177,15 +179,20 @@ def _check_response_security(
             except json.JSONDecodeError:
                 args = {}
 
+            # MCP 客户端 (如 OpenClaw) 会给工具名加 "{server}__" 前缀,
+            # 策略规则按政务工具规范名匹配, 评估前先归一化;
+            # tc 本身保留原名, 客户端才能继续执行
+            policy_tool_name = tool_name.split("__", 1)[-1] if "__" in tool_name else tool_name
+
             from system.policies.unary_gate import (
                 _evaluate_rules, _build_tool_context, _DEFAULT_RULES, _collect_prior_text, _summarize_args,
             )
             from system.core.tool_parsers import parse_tool_instruction
 
-            parsed = parse_tool_instruction(tool_name, args)
+            parsed = parse_tool_instruction(policy_tool_name, args)
             instruction = {
                 "content": {
-                    "tool_name": tool_name,
+                    "tool_name": policy_tool_name,
                     "tool_call_id": tc.get("id", ""),
                     "arguments": args,
                 },
@@ -193,24 +200,92 @@ def _check_response_security(
             }
 
             prior_text = _collect_prior_text(message.get("security_type", {}).get("_instructions", []), tc.get("id", ""))
-            # 简化：从 messages 收集所有 prior text
+            # prior_text 保留全量上下文(供 LLM judge 参考);
+            # has_injection 只扫不可信来源(user 输入 + tool 结果),
+            # 排除 system/assistant 消息 —— 真实 agent 框架(如 OpenClaw)的
+            # system prompt 含日期/指令等常规词, 混入扫描会把所有高风险工具
+            # 误判为"trace 含注入"造成系统性误拦
+            # tool_call_id -> (tool_name, args): 用于判定 tool 结果的来源
+            tool_call_meta = {}
+            for m in messages:
+                if m.get("role") != "assistant":
+                    continue
+                for t in m.get("tool_calls") or []:
+                    fn = t.get("function", {})
+                    try:
+                        targs = json.loads(fn.get("arguments", "{}")) if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
+                    except json.JSONDecodeError:
+                        targs = {}
+                    tool_call_meta[t.get("id", "")] = (fn.get("name", ""), targs)
+
+            def _is_trusted_tool_result(m: Dict) -> bool:
+                """读取技能库(read skills/)属于开发者可信内容;
+                读业务文档/查询结果仍是不可信来源(间接注入入口)"""
+                meta = tool_call_meta.get(m.get("tool_call_id", ""))
+                if not meta:
+                    return False
+                tname, targs = meta
+                tname = tname.split("__", 1)[-1] if "__" in tname else tname
+                if tname in ("read", "skills", "skill_read", "load_skill"):
+                    path = str(targs.get("path", "") or targs.get("file_path", ""))
+                    if "skills/" in path.replace("\\", "/"):
+                        return True
+                return False
+
             all_text = []
+            untrusted_text = []
             for m in messages:
                 content = m.get("content", "")
+                role = m.get("role", "")
+                texts = []
                 if isinstance(content, str):
-                    all_text.append(content)
+                    texts.append(content)
                 elif isinstance(content, list):
                     for b in content:
                         if isinstance(b, dict) and "text" in b:
-                            all_text.append(b["text"])
+                            texts.append(b["text"])
+                all_text.extend(texts)
+                if role == "user":
+                    untrusted_text.extend(texts)
+                elif role == "tool" and not _is_trusted_tool_result(m):
+                    untrusted_text.extend(texts)
             prior_text = "\n".join(all_text)[:3000]
 
             has_injection = any(
-                mk in prior_text.lower() for mk in _INJECTION_MARKERS
+                mk in "\n".join(untrusted_text).lower() for mk in _INJECTION_MARKERS
             )
+            if has_injection:
+                # 审计记录命中的具体 marker + 命中消息的角色/摘要, 便于排查误报来源
+                untrusted_joined = "\n".join(untrusted_text).lower()
+                per_msg = []
+                for m in messages:
+                    if m.get("role") not in ("user", "tool"):
+                        continue
+                    c = m.get("content", "")
+                    texts = [c] if isinstance(c, str) else [
+                        b.get("text", "") for b in c
+                        if isinstance(b, dict) and "text" in b
+                    ] if isinstance(c, list) else []
+                    joined = " ".join(texts).lower()
+                    hit = [mk for mk in _INJECTION_MARKERS if mk in joined][:3]
+                    if hit:
+                        per_msg.append({
+                            "role": m.get("role"),
+                            "head": joined[:100],
+                            "markers": hit,
+                        })
+                audit_entries.append({
+                    "type": "injection_markers_hit",
+                    "tool": policy_tool_name,
+                    "markers": [
+                        mk for mk in _INJECTION_MARKERS
+                        if mk in untrusted_joined
+                    ][:5],
+                    "sources": per_msg[:3],
+                })
 
             ctx = _build_tool_context(
-                tool_name=tool_name,
+                tool_name=policy_tool_name,
                 tool_call_id=tc.get("id", ""),
                 args_dict=args,
                 ins=instruction,
@@ -219,12 +294,12 @@ def _check_response_security(
                 prior_send_count=prior_send_count,
             )
             # 本响应内连续 send_email 也计入累计
-            if tool_name in send_names:
+            if policy_tool_name in send_names:
                 prior_send_count += 1
 
             # 意图分类器（快速前置层, <1ms）
             # 结构化危险操作直接 BLOCK, 不依赖 LLM Judge
-            intent, _ = classify_tool_call(tool_name, args, prior_send_count)
+            intent, _ = classify_tool_call(policy_tool_name, args, prior_send_count)
             intent_action = intent_to_action(intent)
 
             if intent_action == "BLOCK":
@@ -240,11 +315,11 @@ def _check_response_security(
                 )
             else:
                 decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
-            if decision is None and should_judge(tool_name):
+            if decision is None and should_judge(policy_tool_name):
                 # 规则未命中且为高风险工具, 调 LLM judge 语义兜底
                 decision_str, reason = llm_judge(
                     prior_text=prior_text[:2000],
-                    tool_name=tool_name,
+                    tool_name=policy_tool_name,
                     args_summary=_summarize_args(args),
                     trace_id=response.get("id", "proxy"),
                 )
@@ -345,6 +420,12 @@ def _check_response_security(
                 # 替换原文而非追加, 防止泄密内容照常返回给客户端
                 message["content"] = f"⚠️ 该响应已被防护系统拦截。理由:{reason[:100]}"
                 audit_entries.append({"type": "text_blocked", "reason": reason[:200]})
+                # 设置 x_gov_proxy 扩展字段（供 runner 归因）
+                if "x_gov_proxy" not in response:
+                    response["x_gov_proxy"] = {"blocked_tool_calls": []}
+                response["x_gov_proxy"]["text_blocked"] = {
+                    "reason": reason[:200],
+                }
 
     return response, audit_entries
 
@@ -383,6 +464,16 @@ class GovProxyHandler(BaseHTTPRequestHandler):
 
         messages = request_body.get("messages", [])
         is_stream = request_body.get("stream", False)
+        if os.environ.get("GOV_PROXY_DEBUG_MSG"):
+            # 临时诊断: 打印消息结构 (角色/工具名/内容开头), 不进审计日志
+            for i, m in enumerate(messages):
+                tc_names = [
+                    f"{t.get('function', {}).get('name', '')}({str(t.get('function', {}).get('arguments', ''))[:60]})"
+                    for t in (m.get("tool_calls") or [])
+                ]
+                head = str(m.get("content", ""))[:70].replace("\n", "␤")
+                print(f"    msg[{i}] role={m.get('role')} "
+                      f"tool_call_id={m.get('tool_call_id','-')} tc={tc_names} head={head}")
         print(f"    model={req_model} ({api_config['name']}) stream={is_stream} msgs={len(messages)}")
 
         upstream_url = api_config["url"]
@@ -390,6 +481,8 @@ class GovProxyHandler(BaseHTTPRequestHandler):
         request_body["model"] = api_config["model"]
         # 强制非流式: 让 proxy 能做策略检查 (不管客户端是否请求 stream)
         request_body["stream"] = False
+        # stream_options 只在流式下合法, 上游会拒绝非流式请求携带它
+        request_body.pop("stream_options", None)
         body = json.dumps(request_body).encode()
         req = urllib.request.Request(
             upstream_url,
