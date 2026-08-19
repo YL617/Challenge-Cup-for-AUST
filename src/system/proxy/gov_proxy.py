@@ -147,9 +147,14 @@ def _check_response_security(
 
     Returns:
         (modified_response, audit_entries)
+
+    环境变量 GOV_PROXY_OBSERVE=1 时为观察模式: 策略照跑、审计照写,
+    但不修改响应(不移除 tool_calls、不替换文本) —— 用于"无防护 OpenClaw"
+    的攻击有效性测量, 保证链路与有防护时完全一致。
     """
     audit_entries = []
     response = json.loads(json.dumps(response))  # deep copy
+    observe_only = os.environ.get("GOV_PROXY_OBSERVE", "") == "1"
     choices = response.get("choices", [])
     if not choices:
         return response, audit_entries
@@ -344,9 +349,17 @@ def _check_response_security(
                         "reason": reason[:200],
                     })
 
-            if decision is not None:
+            if decision is not None and not observe_only:
                 tc["_blocked"] = decision.message
                 tc["_blocked_rule"] = getattr(decision, "rule_id", "")
+            elif decision is not None and observe_only:
+                # 观察模式: 不拦, 只记 "如果拦截会拦什么"
+                audit_entries.append({
+                    "type": "observe_would_block",
+                    "tool": policy_tool_name,
+                    "rule": getattr(decision, "rule_id", ""),
+                    "reason": decision.message[:120],
+                })
 
         # 移除被标记的 tool_calls
         original_calls = message.get("tool_calls", [])
@@ -420,7 +433,7 @@ def _check_response_security(
                 "decision": decision,
                 "reason": reason[:200],
             })
-            if decision == "BLOCK":
+            if decision == "BLOCK" and not observe_only:
                 # 替换原文而非追加, 防止泄密内容照常返回给客户端
                 message["content"] = f"⚠️ 该响应已被防护系统拦截。理由:{reason[:100]}"
                 audit_entries.append({"type": "text_blocked", "reason": reason[:200]})
@@ -430,6 +443,11 @@ def _check_response_security(
                 response["x_gov_proxy"]["text_blocked"] = {
                     "reason": reason[:200],
                 }
+            elif decision == "BLOCK" and observe_only:
+                audit_entries.append({
+                    "type": "observe_would_block_text",
+                    "reason": reason[:120],
+                })
 
     return response, audit_entries
 
