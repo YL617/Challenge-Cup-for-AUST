@@ -40,6 +40,7 @@ def load_cases() -> Dict[str, Dict]:
         "data/system-design/e2e-pilot/e2e_cases_v11_candidates.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v11b_candidates.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v11c_candidates.jsonl",
+        "data/system-design/e2e-pilot/e2e_cases_v11d_candidates.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v10_expanded_20.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v9_replace_38.jsonl",
         "data/system-design/e2e-pilot/e2e_cases_v6_realistic_23.jsonl",
