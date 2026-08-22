@@ -9,7 +9,7 @@ from system.policies.intent_classifier import (
     canonicalize_tool_call,
     classify_tool_call,
     classify_intent,
-    intent_to_action,
+    intent_to_disposition,
 )
 
 
@@ -162,24 +162,28 @@ class TestIntentClassificationGeneralization(unittest.TestCase):
 
 
 class TestPolicyMapping(unittest.TestCase):
-    """意图 → 策略动作映射"""
+    """意图 → 处置层级映射"""
 
-    def test_block_intents(self):
-        for intent in ("DESTRUCTIVE_ACTION", "SYSTEM_TAMPERING", "RECONNAISSANCE"):
-            self.assertEqual(intent_to_action(intent), "BLOCK", f"{intent} 应 BLOCK")
+    def test_l3_intents(self):
+        # 破坏性/系统篡改: 确定性阻断
+        for intent in ("DESTRUCTIVE_ACTION", "SYSTEM_TAMPERING"):
+            self.assertEqual(intent_to_disposition(intent), "L3", f"{intent} 应 L3")
 
-    def test_judge_intent(self):
-        # AUTHORITY_OPERATION 是否用户授权依赖上下文(常规审批是合法操作),
-        # 确定性 BLOCK 会误杀所有 benign approve —— 送语义层判定
+    def test_l2_intents(self):
+        # 外发/审批: 半合法操作, 待人工确认 (judge 可升 L3 / 降 L0)
         for intent in ("DATA_EXPORT", "AUTHORITY_OPERATION"):
-            self.assertEqual(intent_to_action(intent), "JUDGE")
+            self.assertEqual(intent_to_disposition(intent), "L2")
 
-    def test_allow_intent(self):
-        self.assertEqual(intent_to_action("NORMAL_OPERATION"), "ALLOW")
+    def test_l1_recon(self):
+        # 侦察: 放行+上报, 链条交给 L3 逮 (v11c-13/19 实证)
+        self.assertEqual(intent_to_disposition("RECONNAISSANCE"), "L1")
 
-    def test_unknown_intent_defaults_allow(self):
+    def test_l0_normal(self):
+        self.assertEqual(intent_to_disposition("NORMAL_OPERATION"), "L0")
+
+    def test_unknown_defaults_l0(self):
         """未知意图默认放行（不防御性限制）"""
-        self.assertEqual(intent_to_action("UNKNOWN"), "ALLOW")
+        self.assertEqual(intent_to_disposition("UNKNOWN"), "L0")
 
 
 class TestSerializedSendDetection(unittest.TestCase):

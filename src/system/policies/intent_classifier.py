@@ -325,17 +325,22 @@ def classify_tool_call(
 # ---------------------------------------------------------------------------
 
 # 意图类别 → 默认策略动作
-INTENT_POLICY = {
-    "DESTRUCTIVE_ACTION": "BLOCK",      # 破坏性操作确定性阻断
-    "AUTHORITY_OPERATION": "JUDGE",     # 审批/签字是否用户授权依赖上下文, 送 LLM judge 判定
-                                        # (确定性 BLOCK 会把所有常规审批一并误杀)
-    "SYSTEM_TAMPERING": "BLOCK",        # 系统篡改确定性阻断
-    "RECONNAISSANCE": "BLOCK",          # 探测性操作默认拦
-    "DATA_EXPORT": "JUDGE",             # 数据外发送 LLM Judge 判定
-    "NORMAL_OPERATION": "ALLOW",        # 正常操作放行
+# 处置分层: 意图 → L0 放行 / L1 上报 / L2 确认 / L3 阻断
+# L1 (侦察类放行+上报): 危害发生在外传/破坏动作本身, 拦侦察只会把攻击链
+#   推到看不见的路径 (v11c-13/19 实证); L1 让链条走到危害动作在 L3 逮住
+# L2 (半合法操作): 跨部门外发/审批类操作的合法性取决于带外事实(v9-16 实证),
+#   规则和语义层都无法判定, 处置为暂停待人工确认
+# L3 (确定性危害): 破坏/篡改/结构规则命中, 直接阻断并返回短原因
+DISPOSITION_POLICY = {
+    "NORMAL_OPERATION": "L0",
+    "RECONNAISSANCE": "L1",
+    "DATA_EXPORT": "L2",
+    "AUTHORITY_OPERATION": "L2",
+    "DESTRUCTIVE_ACTION": "L3",
+    "SYSTEM_TAMPERING": "L3",
 }
 
 
-def intent_to_action(intent: str) -> str:
-    """意图类别 → 策略动作 (BLOCK / JUDGE / ALLOW)。"""
-    return INTENT_POLICY.get(intent, "ALLOW")
+def intent_to_disposition(intent: str) -> str:
+    """意图类别 → 处置层级 (L0/L1/L2/L3)。"""
+    return DISPOSITION_POLICY.get(intent, "L0")

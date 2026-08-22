@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src"))
 from system.core.runtime import Runtime
 from system.policies.unary_gate import INJECTION_MARKERS as _INJECTION_MARKERS
 from system.policies.llm_injection_judge import judge as llm_judge, should_judge
-from system.policies.intent_classifier import classify_tool_call, intent_to_action
+from system.policies.intent_classifier import classify_tool_call, intent_to_disposition
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -302,66 +302,79 @@ def _check_response_security(
             if policy_tool_name in send_names:
                 prior_send_count += 1
 
-            # 意图分类器（快速前置层, <1ms）
-            # 结构化危险操作直接 BLOCK, 不依赖 LLM Judge
+            # 意图分类器 → 处置分层 (L0 放行 / L1 上报 / L2 确认 / L3 阻断)
             intent, _ = classify_tool_call(policy_tool_name, args, prior_send_count)
-            intent_action = intent_to_action(intent)
+            disposition = intent_to_disposition(intent)
+            origin = "detected"  # detected=真实检测 / degraded=基础设施故障降级
+            reason = ""
+            rule_id = ""
 
-            if intent_action == "BLOCK":
-                from system.policies.unary_gate import RuleDecision
-                decision = RuleDecision(
-                    index=0, rule_id=f"INTENT-{intent}",
-                    title=f"操作意图分类: {intent}",
-                    description=f"canonicalized intent: {intent}",
-                    effect="BLOCK", scope="tool",
-                    message=f"检测到危险操作意图({intent}), 已确定性阻断",
-                    predicate=None, selector={}, actual={},
-                    source="intent_classifier",
-                )
+            if disposition == "L3":
+                rule_id = f"INTENT-{intent}"
+                reason = f"已阻断: 危险操作意图({intent})"
             else:
-                decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
-            if decision is None and should_judge(policy_tool_name):
-                # 规则未命中且为高风险工具, 调 LLM judge 语义兜底
-                # judge 上下文只用不可信来源(user+tool result)的末尾:
-                # 全量 prior_text 的前 3000 字符会被 agent 框架的 system prompt
-                # 占满, 用户真实请求被截掉, 导致"是否用户明确请求"误判
-                judge_context = "\n".join(untrusted_text)[-2000:]
-                decision_str, reason = llm_judge(
-                    prior_text=judge_context,
-                    tool_name=policy_tool_name,
-                    args_summary=_summarize_args(args),
-                    trace_id=response.get("id", "proxy"),
-                )
-                if decision_str == "BLOCK":
-                    from system.policies.unary_gate import RuleDecision
-                    decision = RuleDecision(
-                        index=0, rule_id="LLM-PROXY-001",
-                        title="Proxy LLM judge",
-                        description="LLM 判定危险",
-                        effect="BLOCK", scope="tool",
-                        message=reason or "LLM 判定风险",
-                        predicate=None, selector={}, actual={},
-                        source="llm_proxy",
+                # 结构性规则引擎对 L0/L1/L2 仍全量评估 (GOV-DENY 命中 = 确定性 L3)
+                rule_decision = _evaluate_rules(rules=_DEFAULT_RULES, ctx=ctx)
+                if rule_decision is not None:
+                    disposition = "L3"
+                    rule_id = getattr(rule_decision, "rule_id", "RULE")
+                    reason = f"已阻断: {rule_decision.message[:80]}"
+                elif disposition == "L2" and should_judge(policy_tool_name):
+                    # L2 半合法操作送语义层精化: 明确安全→L0, 确认攻击(≥8)→L3,
+                    # 其余维持 L2 待人工确认; judge 故障→降级 L2 (degraded)
+                    judge_context = "\n".join(untrusted_text)[-2000:]
+                    decision_str, judge_reason = llm_judge(
+                        prior_text=judge_context,
+                        tool_name=policy_tool_name,
+                        args_summary=_summarize_args(args),
+                        trace_id=response.get("id", "proxy"),
                     )
                     audit_entries.append({
                         "type": "llm_judge",
                         "decision": decision_str,
-                        "reason": reason[:200],
+                        "reason": judge_reason[:200],
                     })
+                    if "fail-closed" in judge_reason or "judge_error" in judge_reason:
+                        # 基础设施故障不计为攻击拦截 (口径分离)
+                        origin = "degraded"
+                    elif decision_str == "BLOCK":
+                        m = re.search(r"score=(\d+)", judge_reason)
+                        score = int(m.group(1)) if m else 6
+                        if score >= 8:
+                            disposition = "L3"
+                            rule_id = "JUDGE-CONFIRM"
+                            reason = f"已阻断: 语义确认攻击({judge_reason[:60]})"
+                        # score 6-7 维持 L2 待人工确认
+                    elif decision_str == "SAFE":
+                        m = re.search(r"score=(\d+)", judge_reason)
+                        score = int(m.group(1)) if m else 5
+                        if score <= 2:
+                            disposition = "L0"  # 明确安全的显式请求放行
+                # L1 侦察: 放行 + 上报, 不做进一步检查 (链条交给 L3 逮)
 
-            if decision is not None and not observe_only:
-                tc["_blocked"] = decision.message
-                tc["_blocked_rule"] = getattr(decision, "rule_id", "")
-            elif decision is not None and observe_only:
+            if disposition == "L1":
+                audit_entries.append({
+                    "type": "tier1_reported",
+                    "tool": policy_tool_name,
+                    "intent": intent,
+                    "origin": "detected",
+                })
+            elif disposition in ("L2", "L3") and not observe_only:
+                tc["_blocked"] = reason or f"需人工确认: {intent}"
+                tc["_blocked_rule"] = rule_id
+                tc["_tier"] = disposition
+                tc["_origin"] = origin
+            elif disposition in ("L2", "L3") and observe_only:
                 # 观察模式: 不拦, 只记 "如果拦截会拦什么"
                 audit_entries.append({
                     "type": "observe_would_block",
                     "tool": policy_tool_name,
-                    "rule": getattr(decision, "rule_id", ""),
-                    "reason": decision.message[:120],
+                    "tier": disposition,
+                    "rule": rule_id,
+                    "reason": (reason or f"需人工确认: {intent}")[:120],
                 })
 
-        # 移除被标记的 tool_calls
+        # 移除被标记的 tool_calls (L2 确认 / L3 阻断 都暂停执行)
         original_calls = message.get("tool_calls", [])
         message["tool_calls"] = [tc for tc in original_calls if "_blocked" not in tc]
         blocked = [tc for tc in original_calls if "_blocked" in tc]
@@ -369,6 +382,8 @@ def _check_response_security(
             for tc in blocked:
                 audit_entries.append({
                     "type": "tool_call_blocked",
+                    "tier": tc.get("_tier", ""),
+                    "origin": tc.get("_origin", "detected"),
                     "tool": tc.get("function", {}).get("name", ""),
                     "reason": tc.get("_blocked", ""),
                 })
@@ -381,6 +396,8 @@ def _check_response_security(
                         "tool": tc.get("function", {}).get("name", ""),
                         "args": tc.get("function", {}).get("arguments", ""),
                         "rule": tc.get("_blocked_rule", ""),
+                        "tier": tc.get("_tier", ""),
+                        "origin": tc.get("_origin", "detected"),
                         "reason": tc.get("_blocked", ""),
                     }
                     for tc in blocked
@@ -433,10 +450,17 @@ def _check_response_security(
                 "decision": decision,
                 "reason": reason[:200],
             })
-            if decision == "BLOCK" and not observe_only:
+            if decision == "BLOCK" and "fail-closed" in reason:
+                # 文本层 judge 故障: 降级放行并记录, 不计为攻击拦截 (口径分离)
+                audit_entries.append({"type": "judge_degraded", "reason": reason[:120]})
+            elif decision == "BLOCK" and not observe_only:
                 # 替换原文而非追加, 防止泄密内容照常返回给客户端
                 message["content"] = f"⚠️ 该响应已被防护系统拦截。理由:{reason[:100]}"
-                audit_entries.append({"type": "text_blocked", "reason": reason[:200]})
+                audit_entries.append({
+                    "type": "text_blocked",
+                    "origin": "detected",
+                    "reason": reason[:200],
+                })
                 # 设置 x_gov_proxy 扩展字段（供 runner 归因）
                 if "x_gov_proxy" not in response:
                     response["x_gov_proxy"] = {"blocked_tool_calls": []}
