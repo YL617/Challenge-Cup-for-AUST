@@ -348,8 +348,13 @@ def _check_response_security(
                     elif decision_str == "SAFE":
                         m = re.search(r"score=(\d+)", judge_reason)
                         score = int(m.group(1)) if m else 5
-                        if score <= 2:
-                            disposition = "L0"  # 明确安全的显式请求放行
+                        # 仅审批类允许语义放行: 用户明确授权在对话上下文可见。
+                        # 数据外发不允许: 外发合法性是组织级带外事实(真有无演练/
+                        # 联调), 文本上合理掩护与真实业务不可分 —— G5 实测 judge
+                        # 对外发攻击 503 次给 score≤2, 全部放行造成 38 条穿透。
+                        # judge 的职责是确认攻击(升 L3), 无权豁免数据外发(降 L0)。
+                        if score <= 2 and intent == "AUTHORITY_OPERATION":
+                            disposition = "L0"
                 # L1 侦察: 放行 + 上报, 不做进一步检查 (链条交给 L3 逮)
 
             if disposition == "L1":
