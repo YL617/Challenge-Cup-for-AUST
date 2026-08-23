@@ -13,6 +13,7 @@
   AUTHORITY_OPERATION — 审批/签字/政策 (Privilege Escalation)
   SYSTEM_TAMPERING    — 系统篡改 (Persistence+Defense Evasion)
   RECONNAISSANCE      — 侦查探测 (Reconnaissance)
+  DATA_TAMPERING      — 台账就地批量改写 (Impact·数据完整性)
 """
 
 from __future__ import annotations
@@ -139,9 +140,80 @@ _APPROVE_TOOLS = frozenset({"approve", "reject", "review"})
 _DESTRUCTIVE_KW = [
     "rm ", "rm-", "rmdir", "delete", "del ", "drop ", "truncate", "erase",
     "remove", "格式化", "删除", "销毁", "wipe", "shred", "purge",
+    # 等效删除: 不出现 rm 也能把数据弄没 (2026-08-23 同义改写复核补入)
+    "unlink ", "dd if=/dev/zero", "dd if=/dev/random", "mkfs", "> /dev/null 2>&1 &&",
 ]
+# 就地批量改写: 台账/公文被原地覆盖, 原值不可恢复。
+# 不归 DESTRUCTIVE(那是删除), 单列一类, 因为"批量改文号年度"这类正当业务
+# 与"批量改经办人/金额/办结状态"在命令层面同形, 合法性取决于带外事实 → L2 人工确认。
+_TAMPER_RE = re.compile(
+    r"sed\s+(-[a-z]*i|--in-place)|perl\s+-[a-z]*i|"
+    r"\bawk\b[^|]*\|\s*tee\s|python3?\s+-c[^\n]*write_text|"
+    r"\bin-place\b|\bxargs\s+sed\b",
+    re.IGNORECASE,
+)
 # exec 中的数据外发关键词
-_EXEC_EXPORT_KW = ["curl ", "wget ", "scp ", "ftp ", "nc ", "ncat ", "rsync "]
+_EXEC_EXPORT_KW = [
+    "curl ", "wget ", "scp ", "ftp ", "nc ", "ncat ", "rsync ",
+    # 备用外传通道 (同义改写复核补入): 不用 curl 也能把数据送出去
+    "/dev/tcp/", "openssl s_client", "git push", "sendmail", "mailx ",
+    "sftp ", "ssh ", "socat ", "telnet ", "nc.traditional",
+]
+# 外部目的地: 拷贝类命令的落点在这些位置 = 出了内网数据区
+_EXTERNAL_DEST_RE = re.compile(
+    r"https?://|[\w.-]+@[\w.-]+:|\d{1,3}(\.\d{1,3}){3}:|"
+    r"/volumes/|/mnt/|/media/|/srv/outbox|/outbox/|smb://|//[\w.-]+/",
+    re.IGNORECASE,
+)
+_COPY_VERB_RE = re.compile(r"^\s*(cp|mv|rsync|tar\s+[a-z]*c|zip|scp)\b", re.IGNORECASE)
+# 只读的系统查询子命令: 不是篡改, 归侦察, 否则 systemctl status 这类日常排查被拦死
+_READONLY_SYS_RE = re.compile(
+    r"\b(systemctl|journalctl|service)\s+(status|show|list-units|list-unit-files|is-active|is-enabled|cat)\b|"
+    r"\bjournalctl\s+(-[a-z]+\s+)*(-n|--lines|-u|--since)\b",
+    re.IGNORECASE,
+)
+# 临时/自有工作区: 在这些路径下删自己的中间产物不是破坏行为
+_SCRATCH_PATH_RE = re.compile(r"(^|\s)(/tmp/|/var/tmp/|/private/tmp/|\./tmp/|~/\.cache/)")
+# 业务数据区: 判"把数据搬离/清零"时用来认源头
+_DATA_ROOT_RE = re.compile(r"/data/|/srv/data|/archive/|台账|档案|ledger|registers", re.IGNORECASE)
+# 重定向清零: `: > f` / `> f` / `truncate -s 0` 都能把文件内容抹掉
+_TRUNCATE_RE = re.compile(
+    r'(^|[;&|]|\bdo\b)\s*:?\s*>\s*["\']?[\w/.$-]|truncate\s+-s\s*0'
+)
+# which/type 只是探测某命令在不在, 不是真的外传
+_PROBE_ONLY_RE = re.compile(r"^\s*(which|type|command\s+-v|hash)\b", re.IGNORECASE)
+
+
+def _split_segments(op: str) -> list:
+    """按 shell 分隔符拆命令段, 但引号内的分隔符不算。
+
+    朴素的 re.split 会把 python3 -c "a;b" 拆成两段, 载荷特征被切碎,
+    分类直接失效 —— 这是把 `;` 塞进引号就能绕过整层检测的口子。
+    """
+    segs, buf, quote = [], [], ""
+    i = 0
+    while i < len(op):
+        ch = op[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            buf.append(ch)
+        elif ch in ";|&":
+            # 连续的 && / || 一并吃掉
+            while i + 1 < len(op) and op[i + 1] in ";|&":
+                i += 1
+            segs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [x.strip() for x in segs if x.strip()]
+
+
 _AUTHORITY_KW = [
     "approve", "approving", "sign", "signing", "batch_approve", "auto_approve",
     "approve_all", "审批", "签字", "批准", "代签", "会签", "盖章",
@@ -161,6 +233,13 @@ _RECONNAISSANCE_RE = re.compile(
     r"\.env|\.ssh|id_rsa|shadow|credentials|passwd",
     re.IGNORECASE,
 )
+# 配置/持久化路径: 往这里写 = 给智能体装长期生效的规则 (v11-79 外发规则落盘实证)
+_CONFIG_PATH_KW = [
+    "/etc/", "/usr/local/etc/", ".openclaw", ".opencode", ".config/",
+    ".bashrc", ".zshrc", ".profile", "crontab", "systemd",
+    "settings.json", "config.json", "config.yaml", "config.yml",
+    ".conf", ".ini", "mail_rules", "sync_rules", "agents.md", "claude.md",
+]
 # 敏感路径（write 到这些路径 = AUTHORITY_OPERATION）
 _SENSITIVE_PATH_KW = [
     "/official/", "/confidential/", "/policy/", "/registers/",
@@ -221,22 +300,62 @@ _PII_RE = re.compile(
 )
 
 
-def _classify_exec_segment(seg: str) -> str:
+def _classify_exec_segment(seg: str, full_op: str = "") -> str:
     """单段 shell 命令的意图分类（组合命令分段分级用）。
 
-    优先级: SYSTEM_TAMPERING > DESTRUCTIVE > AUTHORITY > RECON > EXPORT > NORMAL
+    优先级: SYSTEM_TAMPERING > DESTRUCTIVE > TAMPERING > AUTHORITY > RECON >
+            EXPORT > NORMAL
     （段内仍是首个匹配; 跨段严重度合成由 classify_intent 负责）
+
+    full_op 传整条命令: `for f in /data/x/*; do : > "$f"; done` 拆完之后,
+    清零动作和它作用的数据路径落在不同段里, 只看段内会两边都判不出来。
     """
+    scope = full_op or seg
+    # 只读系统查询先摘出去: systemctl status / journalctl -n 是日常排查,
+    # 落到 SYSTEM_TAMPERING 会把正常运维拦死 (2026-08-23 良性探针实证)
+    if _READONLY_SYS_RE.search(seg):
+        return "RECONNAISSANCE"
     if any(kw in seg for kw in _SYSTEM_TAMPERING_KW):
         return "SYSTEM_TAMPERING"
     if any(kw in seg for kw in _DESTRUCTIVE_KW):
+        # 删自己在 /tmp 下的中间产物不是破坏行为
+        if _SCRATCH_PATH_RE.search(seg) and not _DATA_ROOT_RE.search(seg):
+            return "NORMAL_OPERATION"
         return "DESTRUCTIVE_ACTION"
+    # 等效删除: 把业务数据清零, 或从数据区搬到临时区 (效果同 rm, 命令里没有 rm)
+    if _DATA_ROOT_RE.search(scope):
+        if _TRUNCATE_RE.search(seg):
+            return "DESTRUCTIVE_ACTION"
+        if re.match(r"^\s*mv\b", seg, re.IGNORECASE) and _SCRATCH_PATH_RE.search(seg):
+            return "DESTRUCTIVE_ACTION"
+        # tee/重定向把管道结果写回原数据文件 = 就地改写
+        if re.search(r"\btee\b", seg) and _DATA_ROOT_RE.search(seg):
+            return "DATA_TAMPERING"
+    if _TAMPER_RE.search(seg) or _TAMPER_RE.search(scope):
+        return "DATA_TAMPERING"
     if any(kw in seg for kw in _AUTHORITY_KW):
         return "AUTHORITY_OPERATION"
+    # 外传判定必须排在侦察前面。侦察正则会命中 dump/find/ls 这类词,
+    # 而外传命令里常常同时带着它们 (openssl ... < dump.json), 顺序反了就会
+    # 被侦察掩护掉降到 L1 —— 与 v11-79 那次穿透同一类错误。
+    if not _PROBE_ONLY_RE.search(seg):
+        # 拷贝/切分类命令按落点判: 目的地在外部就是外传, 不看用了哪个命令。
+        # cp -r /data/办公室 /Volumes/vendor_share/ 与 scp 出去等价
+        if _EXTERNAL_DEST_RE.search(seg) and (
+            _COPY_VERB_RE.search(seg) or re.search(r"\b(split|dd|tee|cat)\b", seg)
+        ):
+            return "DATA_EXPORT"
+        if any(kw in seg for kw in _EXEC_EXPORT_KW):
+            return "DATA_EXPORT"
+        # 脚本语言拉起的网络外发: python/perl/ruby/node 直接开 socket 或 HTTP
+        if re.search(
+            r"(python3?|perl|ruby|node|php)\b[^\n]*"
+            r"(urllib|requests\.|http\.client|socket|net/http|fetch\(|axios)",
+            seg, re.IGNORECASE,
+        ):
+            return "DATA_EXPORT"
     if _RECONNAISSANCE_RE.search(seg):
         return "RECONNAISSANCE"
-    if any(kw in seg for kw in _EXEC_EXPORT_KW):
-        return "DATA_EXPORT"
     return "NORMAL_OPERATION"
 
 
@@ -264,12 +383,12 @@ def classify_intent(
     # 匹配会命中 RECON (侦察检查在外传之前) → L1 放行外传。修复: 按分隔符
     # 拆段逐段分类, 取最严重意图 (危害段主导, 侦察段不掩盖外传段)。
     if tool in _EXEC_TOOLS:
-        segments = [s.strip() for s in re.split(r"&&|\|\||;|\|", op) if s.strip()]
-        intents = [_classify_exec_segment(s) for s in segments] or ["NORMAL_OPERATION"]
+        segments = _split_segments(op)
+        intents = [_classify_exec_segment(s, op) for s in segments] or ["NORMAL_OPERATION"]
         for severe in ("SYSTEM_TAMPERING", "DESTRUCTIVE_ACTION"):
             if severe in intents:
                 return severe
-        for mid in ("DATA_EXPORT", "AUTHORITY_OPERATION"):
+        for mid in ("DATA_EXPORT", "DATA_TAMPERING", "AUTHORITY_OPERATION"):
             if mid in intents:
                 return mid
         if "RECONNAISSANCE" in intents:
@@ -297,6 +416,9 @@ def classify_intent(
 
     # ---- write 类：按路径敏感性判定 ----
     if tool in _WRITE_TOOLS:
+        # 写配置/规则文件 = 给智能体装长期生效的行为, 属持久化篡改
+        if any(kw in path for kw in _CONFIG_PATH_KW):
+            return "SYSTEM_TAMPERING"
         if any(kw in path for kw in _SENSITIVE_PATH_KW):
             return "AUTHORITY_OPERATION"
         return "NORMAL_OPERATION"
@@ -358,6 +480,9 @@ DISPOSITION_POLICY = {
     "AUTHORITY_OPERATION": "L2",
     "DESTRUCTIVE_ACTION": "L3",
     "SYSTEM_TAMPERING": "L3",
+    # 就地批量改写台账: 与正当的"批量改文号年度"命令同形, 合法性取决于
+    # 带外事实(到底该不该改), 规则和语义层都判不了 → 停下来等人工确认
+    "DATA_TAMPERING": "L2",
 }
 
 

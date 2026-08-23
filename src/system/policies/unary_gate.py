@@ -31,16 +31,34 @@ from ..core.types import LEVEL_ORDER
 # Phase 2.5: 模块级 INJECTION_MARKERS（供 proxy 等外部模块引用）
 # ---------------------------------------------------------------------------
 
+# 下面这些词曾在 INJECTION_MARKERS 里, 实测在真实链路上误报率极高, 已移出。
+# 移出理由都来自 2026-08-23 的实机审计 (src/system/proxy/audit_log.jsonl):
+#   user: / system: / assistant:  会话格式串, 命中过 mock 返回的 JSON 错误体
+#   伪造 / base64 / 解码 / 隐藏指令  命中过我们自己的 SKILL.md 安全须知段落
+#   ignore / override / leak / transmit / payload / malicious / translation /
+#   language model / as an ai / return value / api_key / 凌晨 / 分步 / step1-3
+#     都是正常技术与公文文本里的常见词
+# 一旦 injection_in_trace 被误置真, 该会话后续所有高风险工具调用都会被 L3 拦死,
+# 良性业务整条链路中断, 同时把误拦记成"攻击拦截"污染统计口径。
+# 命令层面的 base64 / 管道外传改由 intent_classifier 在 exec 载荷里判定, 更准。
+RETIRED_LOW_PRECISION_MARKERS = (
+    "伪造", "user:", "system:", "assistant:", "ignore", "override",
+    "leak", "transmit", "payload", "malicious", "decrypt",
+    "translation", "language model", "as an ai", "return value", "api_key",
+    "base64", "解码", "十六进制", "hex encoded", "凌晨", "delayed",
+    "分步", "step1", "step2", "step3", "burst", "20 times", "all users",
+)
+
 INJECTION_MARKERS = (
     # 中文社工/注入标记
-    "隐藏指令", "伪造身份", "伪造签名", "伪造指令", "伪造",
+    "隐藏指令", "伪造身份", "伪造签名", "伪造指令",
     "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
     "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
     "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
     "直接发送", "绕过审批", "跳过审批", "不通过审批",
     "secret_sync", "exfil", "outbox",
     # 英文 prompt injection 标记（基础）
-    "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
+    "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
     "do not tell", "do not inform", "do not report", "do not log",
     # W1-D2: 英文 prompt injection 黑话
     "jailbreak", "jailbroken", "jail-break", "dan mode", "developer mode", "do anything now",
@@ -49,28 +67,28 @@ INJECTION_MARKERS = (
     "ignore all rules", "no restrictions", "unlock mode", "god mode", "bypass safety",
     "training is over", "real mode", "without restrictions",
     "forget your", "disregard your", "ignore your", "override your",
-    "new persona", "new role", "new identity", "as an ai",
+    "new persona", "new identity",
     "execute command", "run shell", "terminal access",
-    "translation", "language model", "speak in",
-    "### instruction", "system:", "assistant:", "user:",
-    "exfiltrate", "leak", "transmit", "send to attacker",
-    "malicious", "backdoor", "payload", "reverse shell",
-    "decrypt", "hashdump", "lsass", "shadow file", "sam file",
+    "speak in",
+    "### instruction",
+    "exfiltrate", "send to attacker",
+    "backdoor", "reverse shell",
+    "hashdump", "lsass", "shadow file", "sam file",
     # Phase 2.5 攻击类型
     "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
-    "ignore previous", "ignore all previous", "override", "system override",
-    "tool result contains", "return value", "output contains", "返回值包含", "工具返回",
+    "ignore previous", "ignore all previous", "system override",
+    "tool result contains", "output contains", "返回值包含", "工具返回",
     "previous session", "上轮 session", "之前用户", "prior conversation",
     "🤖", "💀", "🌐", "忽略所有",
     "then send to", "随后发给", "and then execute", "chain to",
     "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
-    "sk-emergency", "api_key", "aws_access",
-    "schedule later", "at 2am", "凌晨", "delayed",
+    "sk-emergency", "aws_access",
+    "schedule later", "at 2am",
     "0 2 * * *", "每天凌晨",
-    "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
+    "decode this", "base64 编码",
     "| base64 -d", "| sh", "| bash",
-    "step1", "step2", "step3", "execute steps", "分步", "执行 step",
-    "send to all", "burst", "20 times", "发所有人", "批量发送", "all users",
+    "execute steps", "执行 step",
+    "send to all", "发所有人", "批量发送",
 )
 
 

@@ -108,6 +108,35 @@ def _get_stepfun_key_legacy() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+# 各框架给 MCP 工具加的命名空间前缀不同:
+#   OpenClaw / Claude 系   → "gov-mock__exec"  (双下划线)
+#   OpenCode              → "gov-mock_exec"    (单下划线, 见 opencode.ai/docs/agents 权限通配)
+# 策略规则按政务工具规范名匹配, 归一化失败会让所有工具落到"未知工具→放行",
+# 等于防护整体失效, 所以两种前缀都要剥。
+_KNOWN_TOOL_NAMES = frozenset({
+    "exec", "read", "write", "edit", "query_db", "kb_search", "send_email",
+    "send_email_batch", "share_file", "approve", "calendar_create", "cron",
+    "bash", "shell", "run_command", "browser_upload", "webfetch",
+})
+
+
+def normalize_tool_name(raw: str) -> str:
+    """剥掉 MCP 命名空间前缀, 返回策略规则认识的工具名。"""
+    if not raw:
+        return raw
+    if "__" in raw:
+        return raw.split("__", 1)[-1]
+    if raw in _KNOWN_TOOL_NAMES:
+        return raw
+    # 单下划线命名空间: 从右往左找第一个能对上规范名的后缀
+    parts = raw.split("_")
+    for i in range(1, len(parts)):
+        cand = "_".join(parts[i:])
+        if cand in _KNOWN_TOOL_NAMES:
+            return cand
+    return raw
+
+
 def _extract_user_text(messages: List[Dict]) -> str:
     """从 messages 提取用户最后一条消息文本"""
     for msg in reversed(messages):
@@ -171,8 +200,7 @@ def _check_response_security(
         for m in messages:
             if m.get("role") == "assistant":
                 for htc in m.get("tool_calls", []) or []:
-                    hist_name = htc.get("function", {}).get("name", "")
-                    hist_name = hist_name.split("__", 1)[-1] if "__" in hist_name else hist_name
+                    hist_name = normalize_tool_name(htc.get("function", {}).get("name", ""))
                     if hist_name in send_names:
                         prior_send_count += 1
         for tc in tool_calls:
@@ -184,10 +212,10 @@ def _check_response_security(
             except json.JSONDecodeError:
                 args = {}
 
-            # MCP 客户端 (如 OpenClaw) 会给工具名加 "{server}__" 前缀,
+            # MCP 客户端会给工具名加命名空间前缀 (OpenClaw 双下划线 / OpenCode 单下划线),
             # 策略规则按政务工具规范名匹配, 评估前先归一化;
             # tc 本身保留原名, 客户端才能继续执行
-            policy_tool_name = tool_name.split("__", 1)[-1] if "__" in tool_name else tool_name
+            policy_tool_name = normalize_tool_name(tool_name)
 
             from system.policies.unary_gate import (
                 _evaluate_rules, _build_tool_context, _DEFAULT_RULES, _collect_prior_text, _summarize_args,
@@ -223,6 +251,22 @@ def _check_response_security(
                         targs = {}
                     tool_call_meta[t.get("id", "")] = (fn.get("name", ""), targs)
 
+            # 各框架的读文件工具参数名不统一: path / file_path / filePath / file / target。
+            # 只认前两个会让 OpenClaw 内置 read 的技能库读取落到"不可信", 于是
+            # 我们自己 SKILL.md 里的安全须知(含"隐藏指令""伪造"等词)被当成注入证据,
+            # 整条会话被判 injection_in_trace=True, 后续高风险调用全部 L3 拦死。
+            _PATH_ARG_KEYS = (
+                "path", "file_path", "filePath", "filepath", "file",
+                "target", "target_file", "abs_path", "absolute_path",
+            )
+
+            def _arg_path(targs: Dict) -> str:
+                for k in _PATH_ARG_KEYS:
+                    v = targs.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v
+                return ""
+
             def _is_trusted_tool_result(m: Dict) -> bool:
                 """读取技能库(read skills/)属于开发者可信内容;
                 读业务文档/查询结果仍是不可信来源(间接注入入口)"""
@@ -230,10 +274,10 @@ def _check_response_security(
                 if not meta:
                     return False
                 tname, targs = meta
-                tname = tname.split("__", 1)[-1] if "__" in tname else tname
+                tname = normalize_tool_name(tname)
                 if tname in ("read", "skills", "skill_read", "load_skill"):
-                    path = str(targs.get("path", "") or targs.get("file_path", ""))
-                    if "skills/" in path.replace("\\", "/"):
+                    path = _arg_path(targs).replace("\\", "/")
+                    if "skills/" in path or path.endswith("SKILL.md"):
                         return True
                 return False
 

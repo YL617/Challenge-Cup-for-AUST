@@ -34,7 +34,11 @@ check)
   say "环境检查"
   python3 --version || die "需要 python3"
   [ -f "$ROOT/.env.local" ] || die "缺少 .env.local (cp .env.example .env.local 后填 key)"
-  grep -q "DEEPSEEK_API_KEY=..*" "$ROOT/.env.local" || die ".env.local 未填 DEEPSEEK_API_KEY"
+  # 两家上游任填一家即可: PROXY_MODEL 名字里带 deepseek 走 deepseek, 否则走 stepfun
+  grep -qE "^(DEEPSEEK_API_KEY|STEPFUN_API_KEY)=..*" "$ROOT/.env.local" \
+    || die ".env.local 里 DEEPSEEK_API_KEY / STEPFUN_API_KEY 至少填一个"
+  model=$(grep -E "^PROXY_MODEL=" "$ROOT/.env.local" | cut -d= -f2- | tr -d ' ')
+  say "上游模型: ${model:-step-3.7-flash}"
   [ -x "$OPENCLAW_BIN" ] || die "未找到 OpenClaw: $OPENCLAW_BIN (设 OPENCLAW_HOME)"
   port_busy $MOCK_PORT && say "端口 $MOCK_PORT 已被占用 (mock 可能已在跑)" || say "端口 $MOCK_PORT 空闲"
   port_busy $PROXY_PORT && say "端口 $PROXY_PORT 已被占用 (proxy 可能已在跑)" || say "端口 $PROXY_PORT 空闲"
@@ -67,9 +71,11 @@ start|observe)
 
 smoke)
   say "良性冒烟 (经代理调 LLM)"
+  smoke_model=$(grep -E "^PROXY_MODEL=" "$ROOT/.env.local" 2>/dev/null | cut -d= -f2- | tr -d ' ')
+  smoke_model="${smoke_model:-step-3.7-flash}"
   resp=$(curl -s -m 60 -X POST "http://127.0.0.1:$PROXY_PORT/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"回复ok即可"}],"max_tokens":200}')
+    -d "{\"model\":\"$smoke_model\",\"messages\":[{\"role\":\"user\",\"content\":\"回复ok即可\"}],\"max_tokens\":200}")
   echo "$resp" | python3 -c "import json,sys; r=json.load(sys.stdin); print('  LLM 回复:', (r['choices'][0]['message'].get('content') or '(reasoning)')[:40])" \
     || die "冒烟失败: $resp"
   say "冒烟通过"
