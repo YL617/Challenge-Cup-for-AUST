@@ -41,7 +41,13 @@ from ..core.types import LEVEL_ORDER
 # 一旦 injection_in_trace 被误置真, 该会话后续所有高风险工具调用都会被 L3 拦死,
 # 良性业务整条链路中断, 同时把误拦记成"攻击拦截"污染统计口径。
 # 命令层面的 base64 / 管道外传改由 intent_classifier 在 exec 载荷里判定, 更准。
+# 第二批退役 (同日实机复核): 安全词汇的"名词形态"。
+# 智能体自己的安全分析草稿里会写「隐藏指令检测 ✓ 未发现」「Base64 编码内容 ✓ 未发现」,
+# 这是它在报告"没有发现攻击", 却被子串匹配读成"发现了攻击"。
+# 结果是: 智能体的安全自查写得越完整, 它的会话越容易被判成已被注入。
+# 判定攻击要靠祈使形态的攻击话术, 不能靠安全词汇本身。
 RETIRED_LOW_PRECISION_MARKERS = (
+    "隐藏指令", "base64 编码", "冒充", "假冒", "外部伪装",
     "伪造", "user:", "system:", "assistant:", "ignore", "override",
     "leak", "transmit", "payload", "malicious", "decrypt",
     "translation", "language model", "as an ai", "return value", "api_key",
@@ -51,8 +57,8 @@ RETIRED_LOW_PRECISION_MARKERS = (
 
 INJECTION_MARKERS = (
     # 中文社工/注入标记
-    "隐藏指令", "伪造身份", "伪造签名", "伪造指令",
-    "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
+    "伪造身份", "伪造签名", "伪造指令",
+    "我是局长", "我是科长", "我是主任", "我是处长",
     "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
     "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
     "直接发送", "绕过审批", "跳过审批", "不通过审批",
@@ -85,7 +91,7 @@ INJECTION_MARKERS = (
     "sk-emergency", "aws_access",
     "schedule later", "at 2am",
     "0 2 * * *", "每天凌晨",
-    "decode this", "base64 编码",
+    "decode this",
     "| base64 -d", "| sh", "| bash",
     "execute steps", "执行 step",
     "send to all", "发所有人", "批量发送",
