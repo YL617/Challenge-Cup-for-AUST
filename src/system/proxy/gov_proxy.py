@@ -120,6 +120,54 @@ _KNOWN_TOOL_NAMES = frozenset({
 })
 
 
+# 已部署技能库的正文指纹。
+# 技能文档经 tool-result 通道进上下文, 与间接注入同一条通道, 但它是开发者内容。
+# 原本靠调用图回溯判定(read 的 path 含 skills/), 但 OpenClaw 会在框架内部加载技能,
+# 这条 tool 消息没有对应的 assistant tool_call 可回溯, 回溯就失效了 —— 于是我们
+# 自己 SKILL.md 安全须知里的"隐藏指令""base64 编码"被当成注入证据, 整条会话被判污染。
+# 兜底: 拿部署目录里技能正文的开头做指纹, 命中即认开发者内容。
+_SKILL_FINGERPRINTS: Optional[set] = None
+
+
+def _norm_head(text: str, n: int = 240) -> str:
+    return "".join(str(text)[:n].split())
+
+
+def _skill_fingerprints() -> set:
+    """扫描已部署技能目录, 缓存每个 SKILL.md 正文开头的归一化指纹。"""
+    global _SKILL_FINGERPRINTS
+    if _SKILL_FINGERPRINTS is not None:
+        return _SKILL_FINGERPRINTS
+    fps = set()
+    roots = []
+    env_home = os.environ.get("OPENCLAW_HOME")
+    if env_home:
+        roots.append(Path(env_home) / ".openclaw/workspace/skills")
+    repo_root = Path(__file__).resolve().parents[3]
+    roots.append(repo_root.parent / "openclaw-runtime/.openclaw/workspace/skills")
+    roots.append(repo_root / "data/block-03-gov-original-skills/skills")
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for f in root.glob("*/SKILL.md"):
+                try:
+                    fps.add(_norm_head(f.read_text(encoding="utf-8", errors="ignore")))
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    _SKILL_FINGERPRINTS = fps
+    return fps
+
+
+def _is_deployed_skill_text(text: str) -> bool:
+    """这段 tool 结果是不是我们自己部署的技能文档正文。"""
+    if not text or len(text) < 60:
+        return False
+    return _norm_head(text) in _skill_fingerprints()
+
+
 def normalize_tool_name(raw: str) -> str:
     """剥掉 MCP 命名空间前缀, 返回策略规则认识的工具名。"""
     if not raw:
@@ -297,7 +345,9 @@ def _check_response_security(
                 if role == "user":
                     untrusted_text.extend(texts)
                 elif role == "tool" and not _is_trusted_tool_result(m):
-                    untrusted_text.extend(texts)
+                    # 调用图回溯不到时, 再用技能正文指纹兜一层
+                    if not any(_is_deployed_skill_text(t) for t in texts):
+                        untrusted_text.extend(texts)
             prior_text = "\n".join(all_text)[:3000]
 
             has_injection = any(

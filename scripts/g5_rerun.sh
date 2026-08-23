@@ -20,7 +20,7 @@ sleep 1
 
 for r in 1 2 3; do
   echo "[$(ts)] === 有防护 66 条 seed $r ==="
-  python3 -u src/scripts/openclaw_case_runner.py --file "$POOL" --timeout 150 \
+  OPENCLAW_HOME="${OPENCLAW_HOME:-$(dirname "$ROOT")/openclaw-runtime}" python3 -u src/scripts/openclaw_case_runner.py --file "$POOL" --timeout 150 \
     --out "$OUT/g5-guarded-r$r.jsonl" 2>&1 | tail -6
 done
 
@@ -28,16 +28,16 @@ echo "[$(ts)] === 白名单 25 条 × 3 (runner 经代理) ==="
 for r in 1 2 3; do
   set -a; source .env.local; set +a
   PROXY_URL="http://127.0.0.1:4000/v1/chat/completions" \
-  MODEL_NAME=deepseek-v4-flash \
+  MODEL_NAME="${PROXY_MODEL:-step-3.7-flash}" \
   python3 -u src/scripts/multiround_runner.py --cases "$WHITE" \
-    --out "$OUT/g5-white-r$r.jsonl" --model deepseek-v4-flash --white 2>&1 | tail -4
+    --out "$OUT/g5-white-r$r.jsonl" --model "${PROXY_MODEL:-step-3.7-flash}" --white 2>&1 | tail -4
 done
 
 echo "[$(ts)] === 切观察模式, 无防护基线 66 条 × 1 ==="
 pkill -f "gov_proxy.py" || true; sleep 1
 GOV_PROXY_OBSERVE=1 nohup python3 -u src/system/proxy/gov_proxy.py > logs/proxy-observe-g5.log 2>&1 &
 sleep 2
-python3 -u src/scripts/openclaw_case_runner.py --file "$POOL" --timeout 150 \
+OPENCLAW_HOME="${OPENCLAW_HOME:-$(dirname "$ROOT")/openclaw-runtime}" python3 -u src/scripts/openclaw_case_runner.py --file "$POOL" --timeout 150 \
   --out "$OUT/g5-baseline-observe.jsonl" 2>&1 | tail -6
 
 echo "[$(ts)] === 恢复执行模式 ==="
