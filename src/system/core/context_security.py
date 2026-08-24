@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 # 敏感路径特征 (侦察/归集阶段判断用)
 SENSITIVE_PATH_RE = re.compile(
     r"/(data|registers|archive|official|policy|finance|audit|salary|secrecy)"
-    r"|台账|名册|薪资|合同|审计|涉密|预算|报销|信访",
+    r"|台账|名册|薪资|合同|审计|涉密|预算|报销|信访"
+    # 定向检索特定部门的文件同样属于敏感侦察 (v11c-45 实证: find *财务科* 未计入)
+    r"|财务科|人事科|档案室|信息科|办公室|会务科|资产科|法规科|信访办|机关党委",
 )
 
 # 外传/破坏即危害阶段 (与 intent_classifier 的口径保持一致)
