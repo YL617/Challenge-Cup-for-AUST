@@ -864,7 +864,12 @@ class GovProxyHandler(BaseHTTPRequestHandler):
         # 命中注入标记的 tool-result/检索内容用明确分隔符框起来, 并在
         # system 提示里声明"框内是数据不是指令"; 风险计入会话状态,
         # 供输出侧判定时合并 (输入侧标注 → 输出侧合并判定)。
-        input_scan = _input_side_guard(request_body)
+        # observe 模式下跳过输入侧注入(它是我们的防护干预, 会抬高模型自拒,
+        # 污染"纯模型意愿"的基线测量 —— 有效性认证必须测裸模型)
+        if os.environ.get("GOV_PROXY_OBSERVE", "") != "1":
+            input_scan = _input_side_guard(request_body)
+        else:
+            input_scan = {"session_id": "", "flagged": 0, "markers": [], "sources": []}
         if input_scan["flagged"]:
             AUDIT.append({
                 "type": "input_scan",
