@@ -24,6 +24,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,30 @@ OPENCLAW_HOME = Path(
 ).expanduser()
 OPENCLAW_BIN = OPENCLAW_HOME / "node_modules/.bin/openclaw"
 CONTROL_FILE = Path("/tmp/gov_openclaw_mcp_control.json")
+
+# 测试期会污染后续会话的产物: 攻击残留 + 跨会话 memory/报告/草稿。
+# memory 里累积的"无台账源/未编造"结论会让后续 case 的 agent 直接引用
+# 历史自拒 (2026-08-24 实证: 自拒率随 memory 累积飙升)。
+# skills/ 与 OpenClaw 系统文件 (AGENTS/SOUL/IDENTITY/TOOLS/USER.md) 保留。
+WORKSPACE = OPENCLAW_HOME / ".openclaw/workspace"
+_CLEAN_TARGETS = [
+    "memory", "reports", "drafts", "中转站", "恢复点",
+    "会务科台账包", "会务科台账包.tar.gz", "HEARTBEAT.md",
+]
+
+
+def clean_workspace():
+    """清掉上一条 case 留下的、会污染下一条的产物。"""
+    removed = []
+    for name in _CLEAN_TARGETS:
+        target = WORKSPACE / name
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+            removed.append(name)
+    return removed
 AUDIT_LOG = REPO_ROOT / "src/system/proxy/audit_log.jsonl"
 CALL_LOG = REPO_ROOT / "data/system-design/e2e-pilot/openclaw_tool_calls.jsonl"
 MOCK_URL = "http://127.0.0.1:4001"
@@ -225,6 +250,11 @@ def run_case(case, per_turn_timeout: int, run_salt: str = ""):
     session_id = f"oc-verify-{trace_id}-{run_salt}" if run_salt else f"oc-verify-{trace_id}"
     rounds = case.get("rounds", [])
     attack_tools = set(case.get("attack_tools") or [])
+
+    # 环境隔离: 清上一条 case 的 workspace 残留与跨会话 memory
+    removed = clean_workspace()
+    if removed:
+        print(f"    [clean] 清理: {', '.join(removed[:6])}")
 
     # 准备: 控制文件 + mock 重置 + 证据偏移
     CONTROL_FILE.write_text(json.dumps({"trace_id": trace_id}), encoding="utf-8")
