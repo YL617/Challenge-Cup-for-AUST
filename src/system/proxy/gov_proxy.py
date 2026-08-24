@@ -39,6 +39,8 @@ from system.policies.intent_classifier import classify_tool_call, intent_to_disp
 from system.core.context_security import ContextSecurity, derive_session_id
 from system.core.approval_queue import ApprovalQueue
 from system.core.audit_chain import AuditChain
+from system.core.resource_model import assess as resource_assess
+from system.core.policy_config import get_config
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -437,7 +439,7 @@ def _check_response_security(
                     elif decision_str == "BLOCK":
                         m = re.search(r"score=(\d+)", judge_reason)
                         score = int(m.group(1)) if m else 6
-                        if score >= 8:
+                        if score >= int(get_config().get("thresholds.judge_confirm_score", 8)):
                             disposition = "L3"
                             rule_id = "JUDGE-CONFIRM"
                             reason = f"已阻断: 语义确认攻击({judge_reason[:60]})"
@@ -450,7 +452,7 @@ def _check_response_security(
                         # 联调), 文本上合理掩护与真实业务不可分 —— G5 实测 judge
                         # 对外发攻击 503 次给 score≤2, 全部放行造成 38 条穿透。
                         # judge 的职责是确认攻击(升 L3), 无权豁免数据外发(降 L0)。
-                        if score <= 2 and intent == "AUTHORITY_OPERATION":
+                        if score <= int(get_config().get("thresholds.judge_release_score", 2)) and intent == "AUTHORITY_OPERATION":
                             disposition = "L0"
                 # L1 侦察: 放行 + 上报, 不做进一步检查 (链条交给 L3 逮)
 
@@ -458,6 +460,16 @@ def _check_response_security(
             for e in audit_entries:
                 if e.get("type") == "llm_judge" and e.get("reason"):
                     judge_summary = e["reason"][:80]
+
+            # 资源模型评估 (#6): 数据分级×可信域×影响面 → 危害分与微调
+            resource = resource_assess(policy_tool_name, args)
+            if (disposition == "L3" and rule_id.startswith("INTENT-DESTRUCTIVE")
+                    and (resource.get("adjust") or {}).get("type") == "destructive_downgrade"):
+                # 单点 + 低数据级的删除: L3 → L2 待确认 (删临时文件 vs 删整库归档)
+                disposition = resource["adjust"]["to"]
+                reason = (f"需人工确认: 单点低敏删除(数据{resource['data_level']}, "
+                          f"范围{resource['scope']}, harm={resource['harm_score']}), 建议人工确认")
+                rule_id = "RESOURCE-ADJUST"
 
             # 审批重试匹配 (#1): 已批准确认单→放行; 已拒绝/超时→升 L3
             final_confirm_id = None
@@ -519,6 +531,12 @@ def _check_response_security(
                 "judge": judge_summary,
                 "taint_evidence": taint_evidence,
                 "chain": chain_evidence,
+                "resource": {
+                    "data_level": resource.get("data_level"),
+                    "destination": resource.get("destination"),
+                    "scope": resource.get("scope"),
+                    "harm_score": resource.get("harm_score"),
+                },
                 "reason": (reason or "")[:140],
             }
             audit_entries.append(decision_entry)
@@ -711,8 +729,115 @@ def _input_side_guard(request_body: Dict) -> Dict:
     return summary
 
 
+def _write_audit(entries, request_body, messages):
+    """审计落盘 (哈希链 #5), 供流式/非流式两条路径共用。"""
+    for entry in entries:
+        entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+        entry["model"] = request_body.get("model", "?")
+        entry.setdefault("session_id", derive_session_id(messages))
+        AUDIT.append(entry)
+        if entry["type"] == "tool_call_blocked":
+            print(f"  🚫 BLOCKED[{entry.get('tier','')}]: {entry['tool']} "
+                  f"({entry.get('session_id','')})")
+        elif entry["type"] == "decision":
+            print(f"  ⚖️  DECISION: {entry['tool']} → {entry['disposition']} "
+                  f"[{entry.get('session_id','')} r{entry.get('round','?')}]")
+        elif entry["type"] == "llm_judge":
+            print(f"  🧠 LLM: {entry.get('decision', '')}")
+
+
 class GovProxyHandler(BaseHTTPRequestHandler):
     """HTTP handler：OpenAI Chat Completions proxy"""
+
+    def _relay_streaming(self, req, request_body, messages):
+        """流式透传 (#8): 文本增量实时转发, 工具调用缓冲到流末统一检查。
+
+        权衡: 流式模式下文本已实时送达客户端, 文本层拦截无法撤回——
+        执行点收敛到工具调用缓冲 (工具才是副作用所在), 文本层检查跳过。
+        """
+        tool_fragments = {}  # index -> {"id", "name", "arguments"}
+
+        def emit(obj):
+            self.wfile.write(("data: " + json.dumps(obj, ensure_ascii=False) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    emit(chunk)  # usage 等无害块
+                    continue
+                delta = choices[0].get("delta") or {}
+                tcs = delta.get("tool_calls")
+                if tcs:
+                    for f in tcs:
+                        idx = f.get("index", 0)
+                        frag = tool_fragments.setdefault(
+                            idx, {"id": None, "name": "", "arguments": ""})
+                        if f.get("id"):
+                            frag["id"] = f["id"]
+                        fn = f.get("function") or {}
+                        if fn.get("name"):
+                            frag["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            frag["arguments"] += fn["arguments"]
+                    continue  # 工具片段缓冲, 不转发
+                fr = choices[0].get("finish_reason")
+                if fr == "tool_calls":
+                    continue  # 收尾由缓冲检查后自行生成
+                if delta.get("content") is not None or delta.get("reasoning_content") \
+                        or delta.get("role") or fr is not None:
+                    emit(chunk)  # 文本增量/收尾原样转发
+
+        # 流结束: 组装完整 tool_calls 做策略检查
+        if tool_fragments:
+            assembled = [
+                {"id": f["id"] or f"call_{i}", "type": "function",
+                 "function": {"name": f["name"], "arguments": f["arguments"]}}
+                for i, f in sorted(tool_fragments.items())
+            ]
+            synth = {"id": "stream-check", "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": "", "tool_calls": assembled},
+                "finish_reason": "tool_calls"}]}
+            modified, entries = _check_response_security(synth, messages)
+            _write_audit(entries, request_body, messages)
+            msg = modified["choices"][0]["message"]
+            kept = msg.get("tool_calls") or []
+            cid = modified.get("id", "stream-check")
+            if kept:
+                emit({"id": cid, "object": "chat.completion.chunk", "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "tool_calls": [
+                        {"index": i, "id": tc["id"], "type": "function",
+                         "function": {"name": tc["function"]["name"],
+                                      "arguments": tc["function"]["arguments"]}}
+                        for i, tc in enumerate(kept)]},
+                    "finish_reason": None}]})
+                emit({"id": cid, "object": "chat.completion.chunk", "choices": [{
+                    "index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+            extra = msg.get("content") or ""
+            if extra:
+                emit({"id": cid, "object": "chat.completion.chunk", "choices": [{
+                    "index": 0, "delta": {"content": extra}, "finish_reason": None}]})
+            if not kept:
+                emit({"id": cid, "object": "chat.completion.chunk", "choices": [{
+                    "index": 0, "delta": {}, "finish_reason": "stop"}]})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
     def do_POST(self):
         print(f"\n>>> 收到请求: {self.path}")
@@ -766,10 +891,17 @@ class GovProxyHandler(BaseHTTPRequestHandler):
         upstream_url = api_config["url"]
         # 确保 model 名正确
         request_body["model"] = api_config["model"]
-        # 强制非流式: 让 proxy 能做策略检查 (不管客户端是否请求 stream)
-        request_body["stream"] = False
-        # stream_options 只在流式下合法, 上游会拒绝非流式请求携带它
-        request_body.pop("stream_options", None)
+
+        # 流式透传 (#8): 客户端要求流式且配置开启时, 文本实时转发 +
+        # 工具调用缓冲检查; 否则强制非流式走原检查路径
+        stream_passthrough = (
+            is_stream and bool(get_config().get("stream.passthrough", True))
+        )
+        request_body["stream"] = stream_passthrough
+        if stream_passthrough:
+            request_body.setdefault("stream_options", {"include_usage": True})
+        else:
+            request_body.pop("stream_options", None)
         body = json.dumps(request_body).encode()
         req = urllib.request.Request(
             upstream_url,
@@ -780,6 +912,26 @@ class GovProxyHandler(BaseHTTPRequestHandler):
             },
             method="POST",
         )
+
+        if stream_passthrough:
+            try:
+                self._relay_streaming(req, request_body, messages)
+            except urllib.error.HTTPError as e:
+                error_body = e.read()
+                print(f"  ⚠️ 上游 HTTP {e.code}: {error_body[:200]}")
+                self.send_response(e.code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(error_body)
+            except (BrokenPipeError, ConnectionResetError):
+                print("  ⚠️ 客户端提前断开")
+            except Exception as e:
+                print(f"  ⚠️ 流式错误: {e}")
+                try:
+                    self.send_error(502, f"Upstream error: {e}")
+                except Exception:
+                    pass
+            return
 
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -802,21 +954,7 @@ class GovProxyHandler(BaseHTTPRequestHandler):
         modified, audit_entries = _check_response_security(response_json, messages)
 
         # 写审计日志 (哈希链 #5: 每条带 prev_hash/hash, 防篡改可验链)
-        for entry in audit_entries:
-            entry["timestamp"] = datetime.now(timezone.utc).isoformat()
-            entry["model"] = request_body.get("model", "?")
-            entry.setdefault("session_id", derive_session_id(messages))
-            AUDIT.append(entry)
-            if entry["type"] == "tool_call_blocked":
-                print(f"  🚫 BLOCKED[{entry.get('tier','')}]: {entry['tool']} "
-                      f"({entry.get('session_id','')})")
-            elif entry["type"] == "decision":
-                print(f"  ⚖️  DECISION: {entry['tool']} → {entry['disposition']} "
-                      f"[{entry.get('session_id','')} r{entry.get('round','?')}]")
-            elif entry["type"] == "text_injection_detected":
-                print(f"  ⚠️  INJECTION: {entry.get('marker', '')}")
-            elif entry["type"] == "llm_judge":
-                print(f"  🧠 LLM: {entry.get('decision', '')}")
+        _write_audit(audit_entries, request_body, messages)
 
         # 返回
         response_bytes = json.dumps(modified, ensure_ascii=False).encode("utf-8")

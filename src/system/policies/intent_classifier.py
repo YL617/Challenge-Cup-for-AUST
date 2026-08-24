@@ -487,5 +487,9 @@ DISPOSITION_POLICY = {
 
 
 def intent_to_disposition(intent: str) -> str:
-    """意图类别 → 处置层级 (L0/L1/L2/L3)。"""
-    return DISPOSITION_POLICY.get(intent, "L0")
+    """意图类别 → 处置层级 (L0/L1/L2/L3)。外置配置优先 (#7)。"""
+    try:
+        from system.core.policy_config import get_config
+        return get_config().disposition_for(intent)
+    except Exception:
+        return DISPOSITION_POLICY.get(intent, "L0")

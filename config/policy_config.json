@@ -1,0 +1,33 @@
+{
+  "version": "2026-08-24.1",
+  "deployment": {
+    "org_name": "示例市机关 (竞赛演示)",
+    "instance_id": "demo-01"
+  },
+  "_说明": {
+    "disposition": "意图→处置层级, 改这里无需改代码",
+    "thresholds.recon_escalate_n": "敏感侦察达 N 次后 L1→L2",
+    "thresholds.approval_ttl_s": "L2 审批超时秒数, 超时默认拒绝",
+    "data_classification": "数据分级规则, 自上而下首匹配",
+    "harm_adjust": "危害等级对处置的微调规则",
+    "热加载": "修改保存后 30s 内自动生效, 无需重启代理"
+  },
+  "thresholds": {
+    "recon_escalate_n": 3,
+    "approval_ttl_s": 600
+  },
+  "harm_adjust": {
+    "destructive_downgrade": {
+      "max_scope": "single",
+      "max_data_level": "内部",
+      "to": "L2"
+    },
+    "data_export_min_levels": [
+      "敏感",
+      "机密"
+    ]
+  },
+  "disposition": {
+    "DATA_TAMPERING": "L2"
+  }
+}

@@ -119,6 +119,31 @@ class SessionState:
         }
 
 
+def _config_get(dotted, default):
+    """配置读取 (缺失/异常时回退默认, 不影响主流程)。"""
+    try:
+        from system.core.policy_config import get_config
+        v = get_config().get(dotted, default)
+        return v if v is not None else default
+    except Exception:
+        return default
+
+
+def _sensitive_re():
+    """敏感侦察词表自配置编译 (缓存于模块级, 配置热加载后自动更新)。"""
+    global _SENSITIVE_RE_CACHE, _SENSITIVE_RE_KEY
+    pats = _config_get("recon.sensitive_patterns", None) or []
+    key = str(pats)
+    if _SENSITIVE_RE_CACHE is None or _SENSITIVE_RE_KEY != key:
+        _SENSITIVE_RE_CACHE = re.compile("|".join(re.escape(p) for p in pats)) if pats else SENSITIVE_PATH_RE
+        _SENSITIVE_RE_KEY = key
+    return _SENSITIVE_RE_CACHE
+
+
+_SENSITIVE_RE_CACHE = None
+_SENSITIVE_RE_KEY = ""
+
+
 class ContextSecurity:
     """请求级来源标注 + 会话级状态管理 (线程安全, 进程内单例)。"""
 
@@ -127,6 +152,18 @@ class ContextSecurity:
     # 升级阈值: 时效窗口内敏感侦察达到该次数, 后续侦察 L1→L2 (#2)
     RECON_ESCALATE_N = 3
     RECON_WINDOW_S = 1200
+
+    @property
+    def taint_window(self) -> int:
+        return int(_config_get("thresholds.taint_window", self.TAINT_WINDOW))
+
+    @property
+    def recon_escalate_n(self) -> int:
+        return int(_config_get("thresholds.recon_escalate_n", self.RECON_ESCALATE_N))
+
+    @property
+    def recon_window_s(self) -> int:
+        return int(_config_get("thresholds.recon_window_s", self.RECON_WINDOW_S))
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -153,7 +190,7 @@ class ContextSecurity:
         if trusted_tool_call_ids:
             with self._lock:
                 self._trusted_call_ids.update(trusted_tool_call_ids)
-        window = messages[-self.TAINT_WINDOW:]
+        window = messages[-self.taint_window:]
         offset = len(messages) - len(window)
         for i, m in enumerate(window):
             role = m.get("role", "")
@@ -210,7 +247,7 @@ class ContextSecurity:
             # 事件量上限, 防长会话膨胀
             if len(st.recon_events) > 60:
                 st.recon_events = st.recon_events[-30:]
-            if SENSITIVE_PATH_RE.search(op_text or ""):
+            if _sensitive_re().search(op_text or ""):
                 st.sensitive_touched.append((op_text or "")[:60])
                 if len(st.sensitive_touched) > 30:
                     st.sensitive_touched = st.sensitive_touched[-15:]
@@ -222,14 +259,14 @@ class ContextSecurity:
         now = time.time()
         return sum(
             1 for e in st.recon_events
-            if now - e.ts <= self.RECON_WINDOW_S
-            and SENSITIVE_PATH_RE.search(e.detail)
+            if now - e.ts <= self.recon_window_s
+            and _sensitive_re().search(e.detail)
         )
 
     def should_escalate_recon(self, session_id: str) -> Tuple[bool, Dict]:
         """侦察压力达阈值 → 建议 L1 抬 L2, 附链条证据。"""
         pressure = self.recon_pressure(session_id)
-        return pressure >= self.RECON_ESCALATE_N, {
+        return pressure >= self.recon_escalate_n, {
             "recon_pressure": pressure,
             **self.state(session_id).chain_evidence(),
         }

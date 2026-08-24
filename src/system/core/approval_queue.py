@@ -20,7 +20,15 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-DEFAULT_TTL_S = 600  # 10 分钟无人处理默认拒绝
+DEFAULT_TTL_S = 600  # 默认值; 运行时读配置 thresholds.approval_ttl_s (#7)
+
+
+def _ttl() -> int:
+    try:
+        from system.core.policy_config import get_config
+        return int(get_config().get("thresholds.approval_ttl_s", DEFAULT_TTL_S))
+    except Exception:
+        return DEFAULT_TTL_S
 
 
 def args_key(tool: str, args: Dict) -> str:
@@ -58,9 +66,10 @@ class ApprovalQueue:
             return f"CN-{self._seq:06d}"
 
     def create(self, session_id: str, tool: str, args: Dict, reason: str,
-               ttl_s: int = DEFAULT_TTL_S) -> Dict:
+               ttl_s: Optional[int] = None) -> Dict:
         """创建待确认单, 返回含 confirm_id 的记录。"""
         now = time.time()
+        ttl_s = ttl_s if ttl_s is not None else _ttl()
         rec = {
             "confirm_id": self._next_id(),
             "session_id": session_id,
