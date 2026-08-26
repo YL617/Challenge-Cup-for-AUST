@@ -42,4 +42,3 @@ version: 0.1.0
 | `exec` | 命令执行 | `command: string` | 禁止执行任何删除（rm）、批量修改命令。仅允许 `ls` 等只读命令（需白名单校验） |
 
 > **风险标签说明**：低风险 = allow（放行记录）；中风险 = approval（需人工审批）；高风险 = approval/deny（审批或阻断）； = deny（直接拒绝）。
-

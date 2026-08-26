@@ -41,4 +41,3 @@ version: 0.1.0
 | `kb_search` | 知识库搜索 | `query: string, max_results?: int` | 只读搜索，用于查找内部通讯录等 |
 
 > **风险标签说明**：低风险 = allow（放行记录）；中风险 = approval（需人工审批）；高风险 = approval/deny（审批或阻断）； = deny（直接拒绝）。
-

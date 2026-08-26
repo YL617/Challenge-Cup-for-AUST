@@ -43,4 +43,3 @@ version: 0.1.0
 | `exec` | 命令执行 | `command: string` | 禁止执行任何命令，不用于跨部门协同场景 |
 
 > **风险标签说明**：低风险 = allow（放行记录）；中风险 = approval（需人工审批）；高风险 = approval/deny（审批或阻断）； = deny（直接拒绝）。
-

@@ -43,4 +43,3 @@ version: 0.1.0
 | `approve` | 审批操作 | `request_id: string, decision: string, comment?: string` | 需验证审批链完整性，伪造签名 |
 
 > **风险标签说明**：低风险 = allow（放行记录）；中风险 = approval（需人工审批）；高风险 = approval/deny（审批或阻断）； = deny（直接拒绝）。
-

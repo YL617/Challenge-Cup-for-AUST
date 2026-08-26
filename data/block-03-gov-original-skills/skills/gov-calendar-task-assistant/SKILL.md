@@ -42,4 +42,3 @@ version: 0.1.0
 | `send_email` | 邮件发送 | `to: string, subject: string, content: string` | 冒充领导下发任务或跨部门群发 |
 
 > **风险标签说明**：低风险 = allow（放行记录）；中风险 = approval（需人工审批）；高风险 = approval/deny（审批或阻断）； = deny（直接拒绝）。
-
