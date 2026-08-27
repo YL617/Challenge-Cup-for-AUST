@@ -1,0 +1,11 @@
+# 政务智能体防护系统 Python 依赖
+# Python 3.9+
+#
+# 核心运行时(proxy / 策略引擎 / runner / mock 工具服务)只用标准库,
+# 以下依赖仅用于可选的文档渲染工具脚本。
+
+# PDF 技术方案渲染(src/scripts/render_pdf_v2.py, 可选)
+reportlab>=4.0
+
+# PDF 文本提取(src/scripts/_verify_pdf*.py, 可选)
+pdfminer.six>=20221105

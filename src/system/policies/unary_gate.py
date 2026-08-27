@@ -31,16 +31,40 @@ from ..core.types import LEVEL_ORDER
 # Phase 2.5: 模块级 INJECTION_MARKERS（供 proxy 等外部模块引用）
 # ---------------------------------------------------------------------------
 
+# 下面这些词曾在 INJECTION_MARKERS 里, 实测在真实链路上误报率极高, 已移出。
+# 移出理由都来自 2026-08-23 的实机审计 (src/system/proxy/audit_log.jsonl):
+#   user: / system: / assistant:  会话格式串, 命中过 mock 返回的 JSON 错误体
+#   伪造 / base64 / 解码 / 隐藏指令  命中过我们自己的 SKILL.md 安全须知段落
+#   ignore / override / leak / transmit / payload / malicious / translation /
+#   language model / as an ai / return value / api_key / 凌晨 / 分步 / step1-3
+#     都是正常技术与公文文本里的常见词
+# 一旦 injection_in_trace 被误置真, 该会话后续所有高风险工具调用都会被 L3 拦死,
+# 良性业务整条链路中断, 同时把误拦记成"攻击拦截"污染统计口径。
+# 命令层面的 base64 / 管道外传改由 intent_classifier 在 exec 载荷里判定, 更准。
+# 第二批退役 (同日实机复核): 安全词汇的"名词形态"。
+# 智能体自己的安全分析草稿里会写「隐藏指令检测 ✓ 未发现」「Base64 编码内容 ✓ 未发现」,
+# 这是它在报告"没有发现攻击", 却被子串匹配读成"发现了攻击"。
+# 结果是: 智能体的安全自查写得越完整, 它的会话越容易被判成已被注入。
+# 判定攻击要靠祈使形态的攻击话术, 不能靠安全词汇本身。
+RETIRED_LOW_PRECISION_MARKERS = (
+    "隐藏指令", "base64 编码", "冒充", "假冒", "外部伪装",
+    "伪造", "user:", "system:", "assistant:", "ignore", "override",
+    "leak", "transmit", "payload", "malicious", "decrypt",
+    "translation", "language model", "as an ai", "return value", "api_key",
+    "base64", "解码", "十六进制", "hex encoded", "凌晨", "delayed",
+    "分步", "step1", "step2", "step3", "burst", "20 times", "all users",
+)
+
 INJECTION_MARKERS = (
     # 中文社工/注入标记
-    "隐藏指令", "伪造身份", "伪造签名", "伪造指令", "伪造",
-    "外部伪装", "冒充", "假冒", "我是局长", "我是科长", "我是主任", "我是处长",
+    "伪造身份", "伪造签名", "伪造指令",
+    "我是局长", "我是科长", "我是主任", "我是处长",
     "立即创建", "立即下发", "立即执行", "立即删除", "立即覆盖",
     "删除所有", "批量提交", "批量删除", "读取敏感", "覆盖本文件",
     "直接发送", "绕过审批", "跳过审批", "不通过审批",
     "secret_sync", "exfil", "outbox",
     # 英文 prompt injection 标记（基础）
-    "ignore", "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
+    "disregard", "system_prompt", "system prompt", "you are now", "new instructions",
     "do not tell", "do not inform", "do not report", "do not log",
     # W1-D2: 英文 prompt injection 黑话
     "jailbreak", "jailbroken", "jail-break", "dan mode", "developer mode", "do anything now",
@@ -49,28 +73,28 @@ INJECTION_MARKERS = (
     "ignore all rules", "no restrictions", "unlock mode", "god mode", "bypass safety",
     "training is over", "real mode", "without restrictions",
     "forget your", "disregard your", "ignore your", "override your",
-    "new persona", "new role", "new identity", "as an ai",
+    "new persona", "new identity",
     "execute command", "run shell", "terminal access",
-    "translation", "language model", "respond in", "write in", "speak in",
-    "### instruction", "system:", "assistant:", "user:",
-    "exfiltrate", "leak", "transmit", "send to attacker",
-    "malicious", "backdoor", "payload", "reverse shell",
-    "decrypt", "hashdump", "lsass", "shadow file", "sam file",
+    "speak in",
+    "### instruction",
+    "exfiltrate", "send to attacker",
+    "backdoor", "reverse shell",
+    "hashdump", "lsass", "shadow file", "sam file",
     # Phase 2.5 攻击类型
     "image contains", "图片包含", "图片中包含", "ocr contains", "ocr extracted",
-    "ignore previous", "ignore all previous", "override", "system override",
-    "tool result contains", "return value", "output contains", "返回值包含", "工具返回",
+    "ignore previous", "ignore all previous", "system override",
+    "tool result contains", "output contains", "返回值包含", "工具返回",
     "previous session", "上轮 session", "之前用户", "prior conversation",
     "🤖", "💀", "🌐", "忽略所有",
     "then send to", "随后发给", "and then execute", "chain to",
     "rotate credential", "update key", "change password", "轮换凭据", "更新 key",
-    "sk-emergency", "api_key", "aws_access",
-    "schedule later", "at 2am", "凌晨", "delayed", "tomorrow",
+    "sk-emergency", "aws_access",
+    "schedule later", "at 2am",
     "0 2 * * *", "每天凌晨",
-    "base64", "hex encoded", "decode this", "base64 编码", "十六进制", "解码",
+    "decode this",
     "| base64 -d", "| sh", "| bash",
-    "step1", "step2", "step3", "execute steps", "分步", "执行 step",
-    "send to all", "burst", "20 times", "发所有人", "批量发送", "all users",
+    "execute steps", "执行 step",
+    "send to all", "发所有人", "批量发送",
 )
 
 
@@ -424,6 +448,7 @@ def _build_tool_context(
     ins: Dict[str, Any],
     runtime: Runtime,
     injection_in_trace: bool = False,
+    prior_send_count: int = 0,
 ) -> Dict[str, Any]:
     """从 tool_call instruction 构建谓词求值上下文。"""
     st = ins.get("security_type") if isinstance(ins, dict) else {}
@@ -447,6 +472,8 @@ def _build_tool_context(
         "risk": st.get("risk", "LOW"),
         # Phase 2.5: 当前工具是否在含注入标记的 trace 里
         "injection_in_trace": injection_in_trace,
+        # 会话内已发送邮件数(防化整为零: 逐条单发绕过批量审批)
+        "prior_send_count": prior_send_count,
         "tags": sorted(st.get("tags", [])) if isinstance(st.get("tags"), list) else [],
         "review_required": st.get("review_required", False),
         "approval_required": st.get("approval_required", False),
@@ -645,9 +672,6 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     {
         # Phase 2.5.1: 只对"高风险工具" + trace 含 injection 时 deny
-        # 解决 D1 的 7 个 FP：用户主动的 save/write 不算高风险
-        # 高风险工具：exec / send_email / send_file / export_csv / share_file / 
-        #              approve / cron / send_sms + image/kb_search 读取
         "id": "GOV-DENY-006",
         "title": "高风险工具 + prior 含诱导标记时阻断",
         "scope": "tool",
@@ -660,6 +684,245 @@ _DEFAULT_RULES: List[Dict[str, Any]] = [
         "predicate": {"truthy": {"var": "injection_in_trace"}},
         "effect": "BLOCK",
         "message": "检测到 prior 含诱导/社工标记，触发高风险工具调用，已阻断",
+        "enabled": True,
+    },
+    {
+        # GOV-APPROVE-002: send_email 外发到非内部地址需审批
+        "id": "GOV-APPROVE-002",
+        "title": "邮件外发到外部/群发地址需审批",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_email_batch", "send_mail"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "to"}, "external"]},
+                {"matches": [{"var": "to"}, "public"]},
+                {"matches": [{"var": "to"}, "all-departments"]},
+                {"matches": [{"var": "to"}, "all-staff"]},
+                {"matches": [{"var": "to"}, "all-participants"]},
+                {"matches": [{"var": "to"}, "dept-share"]},
+                {"matches": [{"var": "to"}, "sibling-bureau"]},
+                {"matches": [{"var": "to"}, "subordinate"]},
+                {"matches": [{"var": "to"}, "superior-bureau"]},
+                {"matches": [{"var": "to"}, "media"]},
+                {"matches": [{"var": "cc"}, "external"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "邮件外发到外部/群发/跨部门地址，需走审批流程（当前为自动阻断保护）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-007: write 到正式/机密路径阻断
+        "id": "GOV-DENY-007",
+        "title": "写入正式/机密文件路径阻断",
+        "scope": "tool",
+        "selector": {"tool": ["write", "edit", "save", "file_write"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "path"}, "/official/"]},
+                {"matches": [{"var": "path"}, "/confidential/"]},
+                {"matches": [{"var": "path"}, "/data/policy/"]},
+                {"matches": [{"var": "path"}, "/registers/"]},
+                {"matches": [{"var": "path"}, "/archive/"]},
+                {"matches": [{"var": "path"}, "v2025"]},
+                {"matches": [{"var": "path"}, "policy"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "写入正式/机密/政策文件路径，禁止未授权修改（仅允许 /drafts/ 路径）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-008: exec 含 SQL 写操作阻断 (伪造签字/批量审批用)
+        "id": "GOV-DENY-008",
+        "title": "SQL 写操作阻断",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "terminalexecute", "process_execute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "command"}, "UPDATE\\s"]},
+                {"matches": [{"var": "command"}, "INSERT\\s"]},
+                {"matches": [{"var": "command"}, "DELETE\\s"]},
+                {"matches": [{"var": "command"}, "DROP\\s"]},
+                {"matches": [{"var": "command"}, "ALTER\\s"]},
+                {"matches": [{"var": "command"}, "SET\\s+status"]},
+                {"matches": [{"var": "command"}, "approver"]},
+                {"matches": [{"var": "command"}, "代签"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "SQL 写操作（伪造签字/批量审批）阻断，需走正式审批系统",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-009: cron/定时任务阻断 (延迟攻击用)
+        "id": "GOV-DENY-009",
+        "title": "定时任务阻断",
+        "scope": "tool",
+        "selector": {"tool": ["cron", "schedule", "crontab"]},
+        "predicate": {"truthy": {"const": True}},
+        "effect": "BLOCK",
+        "message": "定时任务默认阻断（防止延迟攻击/数据定时外泄）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-010: exec 含 journalctl --vacuum (删审计日志)
+        "id": "GOV-DENY-010",
+        "title": "审计日志清理阻断",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "command"}, "journalctl"]},
+                {"matches": [{"var": "command"}, "vacuum"]},
+                {"matches": [{"var": "command"}, "/data/logs/"]},
+                {"matches": [{"var": "command"}, "audit"]},
+                {"matches": [{"var": "command"}, "systemctl"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "审计日志/系统服务操作阻断（防止证据销毁）",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-011: query_db 读取敏感表 (员工/薪资/个人)
+        "id": "GOV-DENY-011",
+        "title": "敏感数据表查询阻断",
+        "scope": "tool",
+        "selector": {"tool": ["query_db", "database_query", "sql_query"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "table"}, "employees"]},
+                {"matches": [{"var": "table"}, "salary"]},
+                {"matches": [{"var": "table"}, "personnel"]},
+                {"matches": [{"var": "table"}, "staff"]},
+                {"matches": [{"var": "query"}, "身份证"]},
+                {"matches": [{"var": "query"}, "银行卡"]},
+                {"matches": [{"var": "query"}, "薪资"]},
+                {"matches": [{"var": "query"}, "salary"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "敏感数据表（员工/薪资/个人）查询阻断，需走审批",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-012: write 字段名变体 (file_name/name/filename/path 全部覆盖)
+        "id": "GOV-DENY-012",
+        "title": "写入字段名变体覆盖（file_name/name/filename）",
+        "scope": "tool",
+        "selector": {"tool": ["write", "edit", "save", "file_write", "create_file"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "file_name"}, "/official/"]},
+                {"matches": [{"var": "file_name"}, "/confidential/"]},
+                {"matches": [{"var": "file_name"}, "/policy/"]},
+                {"matches": [{"var": "file_name"}, "/registers/"]},
+                {"matches": [{"var": "file_name"}, "/archive/"]},
+                {"matches": [{"var": "file_name"}, "v2025"]},
+                {"matches": [{"var": "file_name"}, "policy"]},
+                {"matches": [{"var": "name"}, "/official/"]},
+                {"matches": [{"var": "name"}, "/confidential/"]},
+                {"matches": [{"var": "name"}, "/policy/"]},
+                {"matches": [{"var": "name"}, "v2025"]},
+                {"matches": [{"var": "filename"}, "/official/"]},
+                {"matches": [{"var": "filename"}, "policy"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "写入字段变体（file_name/name/filename）检测到敏感路径，已阻断",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-013: calendar_create 字段变体支持 (start_time/end_time/summary)
+        "id": "GOV-DENY-013",
+        "title": "calendar_create 字段变体支持（start_time/summary）",
+        "scope": "tool",
+        "selector": {"tool": ["calendar_create", "schedule_meeting", "create_event"]},
+        # 注意: 单次 calendar_create 不应被拦, 应让 LLM Judge 看 trace 内是否异常
+        # 这里仅保留为占位, 不做硬规则
+        "predicate": {"truthy": {"const": False}},
+        "effect": "BLOCK",
+        "message": "calendar_create 由 LLM Judge 兜底（单次规则可能误伤）",
+        "enabled": False,  # 单条规则易误伤, 让 LLM Judge 兜底
+    },
+    {
+        # GOV-DENY-014: write 联合 send_email 时的"过度代理"组合
+        "id": "GOV-DENY-014",
+        "title": "write+send_email 联合操作（自动外发）阻断",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_email_batch", "send_mail"]},
+        "predicate": {
+            "any": [
+                # 同 trace 内有过 write 操作 + 当前 send_email
+                # (这需要在 ctx 里检查 trace_writes, 见后续增强)
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "trace 内已有 write 操作后的 send_email 被视为自动外发（待 PHASE 3.5 加 trace 级联检查）",
+        "enabled": False,  # 暂未实现 trace 级联, 保留为占位
+    },
+    {
+        # GOV-DENY-015: 会话内逐条单发绕过批量审批 (G11)
+        # v3-02 实测: LLM 把"发共享邮箱"化整为零为逐科室单发, 批量规则失效。
+        # 正常业务一次任务发 1-2 封(通知+抄送)属合理, 第 3 封起判定为
+        # 拆分外发, 默认阻断并要求走批量审批通道。
+        "id": "GOV-DENY-015",
+        "title": "会话内逐条单发邮件绕过批量审批",
+        "scope": "tool",
+        "selector": {"tool": ["send_email", "send_mail"]},
+        "predicate": {
+            "ge": [{"var": "prior_send_count"}, {"const": 2}]
+        },
+        "effect": "BLOCK",
+        "message": "本次会话已发送 2 封邮件, 继续逐条发送属于拆分外发, 请改用批量审批通道",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-016: exec 通过 action 字段执行批量审批/签字 (伪造签字)
+        # v3-04/v3-18 实测: exec({"action": "approve_all"}) 穿透,
+        # GOV-DENY-002 只匹配 command 字段, 不匹配 action 字段。
+        "id": "GOV-DENY-016",
+        "title": "exec 批量审批/签字动作阻断（approve_all via action）",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "process_execute", "terminal_execute", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "action"}, "approve_all"]},
+                {"matches": [{"var": "action"}, "batch_approve"]},
+                {"matches": [{"var": "action"}, "approve"]},
+                {"matches": [{"var": "action"}, "sign"]},
+                {"matches": [{"var": "command"}, "approve_all"]},
+                {"matches": [{"var": "command"}, "batch_approve"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "exec 执行批量审批/签字动作需人工审核",
+        "enabled": True,
+    },
+    {
+        # GOV-DENY-017: exec 数据库结构泄露 (list tables/show tables/desc/dump)
+        # v3-04/v3-18 实测: exec({"action": "list_tables"}) 或 exec({"command": "list tables"})
+        # 正则宽松匹配: list.*table 覆盖 list_tables / list tables / list all tables
+        "id": "GOV-DENY-017",
+        "title": "exec 数据库结构探测阻断（list/show/desc/dump）",
+        "scope": "tool",
+        "selector": {"tool": ["exec", "process_execute", "terminal_execute", "terminalexecute"]},
+        "predicate": {
+            "any": [
+                {"matches": [{"var": "action"}, "list.*table"]},
+                {"matches": [{"var": "action"}, "show.*table"]},
+                {"matches": [{"var": "action"}, "desc\\s"]},
+                {"matches": [{"var": "action"}, "dump"]},
+                {"matches": [{"var": "action"}, "schema"]},
+                {"matches": [{"var": "command"}, "list.*table"]},
+                {"matches": [{"var": "command"}, "show.*table"]},
+                {"matches": [{"var": "command"}, "desc\\s"]},
+                {"matches": [{"var": "command"}, "dump"]},
+            ]
+        },
+        "effect": "BLOCK",
+        "message": "exec 探测数据库结构需人工审核",
         "enabled": True,
     },
 ]
